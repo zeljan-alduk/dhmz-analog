@@ -1,15 +1,18 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { ChartType, CalibrationPoint, DataPoint, WorkflowStep } from "@/lib/types";
+import {
+  ChartType,
+  CalibrationPoint,
+  DataPoint,
+  WorkflowStep,
+} from "@/lib/types";
 import { CHART_CONFIGS } from "@/lib/chart-geometry";
 import { ChartSVG } from "@/components/chart-template/ChartSVG";
 import { ImageUpload } from "@/components/image-upload/ImageUpload";
 import { OverlayCanvas } from "@/components/overlay-canvas/OverlayCanvas";
 import { DataTable } from "@/components/data-table/DataTable";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { useTheme } from "@/components/ThemeProvider";
 import {
   Gauge,
   Droplets,
@@ -19,40 +22,79 @@ import {
   RotateCcw,
   Crosshair,
   MousePointerClick,
+  Sun,
+  Moon,
+  Monitor,
+  Layers,
+  Eye,
 } from "lucide-react";
 
 const CHART_OPTIONS: {
   type: ChartType;
   label: string;
+  sublabel: string;
   description: string;
   icon: React.ReactNode;
+  gradient: string;
 }[] = [
   {
     type: "barograph",
     label: "Barograf",
-    description: "Tlak zraka (hPa)",
-    icon: <Gauge className="w-8 h-8" />,
+    sublabel: "Atmospheric Pressure",
+    description: "Tlak zraka",
+    icon: <Gauge className="w-7 h-7" />,
+    gradient: "from-teal-500/20 to-cyan-500/20 dark:from-teal-500/10 dark:to-cyan-500/10",
   },
   {
     type: "hygrograph",
     label: "Higrograf",
-    description: "Relativna vlažnost (%)",
-    icon: <Droplets className="w-8 h-8" />,
+    sublabel: "Relative Humidity",
+    description: "Relativna vlažnost",
+    icon: <Droplets className="w-7 h-7" />,
+    gradient: "from-blue-500/20 to-indigo-500/20 dark:from-blue-500/10 dark:to-indigo-500/10",
   },
   {
     type: "thermograph",
     label: "Termograf",
-    description: "Temperatura (°C)",
-    icon: <Thermometer className="w-8 h-8" />,
+    sublabel: "Temperature",
+    description: "Temperatura zraka",
+    icon: <Thermometer className="w-7 h-7" />,
+    gradient: "from-orange-500/20 to-rose-500/20 dark:from-orange-500/10 dark:to-rose-500/10",
   },
 ];
 
-const STEPS: { key: WorkflowStep; label: string; num: number }[] = [
-  { key: "select", label: "Tip", num: 1 },
-  { key: "upload", label: "Slika", num: 2 },
-  { key: "calibrate", label: "Poravnanje", num: 3 },
-  { key: "digitize", label: "Digitalizacija", num: 4 },
+const STEPS: { key: WorkflowStep; label: string }[] = [
+  { key: "select", label: "Instrument" },
+  { key: "upload", label: "Učitavanje" },
+  { key: "calibrate", label: "Kalibracija" },
+  { key: "digitize", label: "Digitalizacija" },
 ];
+
+function ThemeToggle() {
+  const { theme, setTheme } = useTheme();
+  const items: { value: "light" | "dark" | "system"; icon: React.ReactNode }[] = [
+    { value: "light", icon: <Sun className="w-3.5 h-3.5" /> },
+    { value: "system", icon: <Monitor className="w-3.5 h-3.5" /> },
+    { value: "dark", icon: <Moon className="w-3.5 h-3.5" /> },
+  ];
+  return (
+    <div className="flex items-center bg-muted rounded-lg p-0.5 gap-0.5">
+      {items.map((it) => (
+        <button
+          key={it.value}
+          onClick={() => setTheme(it.value)}
+          className={`p-1.5 rounded-md transition-all duration-200 ${
+            theme === it.value
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {it.icon}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export default function Home() {
   const [step, setStep] = useState<WorkflowStep>("select");
@@ -60,7 +102,7 @@ export default function Home() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [calibrationPoints, setCalibrationPoints] = useState<CalibrationPoint[]>([]);
   const [dataPoints, setDataPoints] = useState<DataPoint[]>([]);
-  const [imageOpacity, setImageOpacity] = useState(0.5);
+  const [svgOpacity, setSvgOpacity] = useState(0.6);
 
   const config = chartType ? CHART_CONFIGS[chartType] : null;
 
@@ -109,123 +151,208 @@ export default function Home() {
   const stepIndex = STEPS.findIndex((s) => s.key === step);
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+    <div className="min-h-screen bg-background transition-colors duration-300">
+      {/* ═══ HEADER ═══ */}
+      <header className="sticky top-0 z-50 glass border-b border-border/50">
+        <div className="max-w-[1600px] mx-auto px-5 h-14 flex items-center justify-between">
+          {/* Logo & title */}
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-green-600 rounded-lg flex items-center justify-center">
-              <Gauge className="w-5 h-5 text-white" />
+            <div className="relative">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-md">
+                <Gauge className="w-4.5 h-4.5 text-white" strokeWidth={2.5} />
+              </div>
+              <div className="absolute -inset-1 rounded-xl bg-emerald-500/20 blur-md -z-10" />
             </div>
-            <div>
-              <h1 className="text-lg font-semibold text-gray-900">
-                DHMZ Analog Digitizer
+            <div className="leading-tight">
+              <h1 className="text-sm font-semibold tracking-tight text-foreground">
+                DHMZ Digitizer
               </h1>
-              <p className="text-xs text-gray-500">
-                Digitalizacija meteoroloških traka
+              <p className="text-[10px] font-medium text-muted-foreground tracking-wider uppercase">
+                Analog Chart Reader
               </p>
             </div>
           </div>
-          {step !== "select" && (
-            <Button variant="ghost" size="sm" onClick={handleReset}>
-              <RotateCcw className="w-4 h-4 mr-1" />
-              Početak
-            </Button>
-          )}
-        </div>
 
-        {/* Step indicator */}
-        {step !== "select" && (
-          <div className="max-w-7xl mx-auto px-4 pb-3">
-            <div className="flex items-center gap-2">
-              {STEPS.map((s, i) => (
-                <div key={s.key} className="flex items-center gap-2">
-                  <Badge
-                    variant={
-                      i === stepIndex
-                        ? "default"
-                        : i < stepIndex
-                          ? "secondary"
-                          : "outline"
-                    }
-                    className={`text-xs ${i === stepIndex ? "bg-green-600" : ""}`}
-                  >
-                    {s.num}. {s.label}
-                  </Badge>
-                  {i < STEPS.length - 1 && (
-                    <ArrowRight className="w-3 h-3 text-gray-300" />
-                  )}
-                </div>
-              ))}
+          {/* Step progress */}
+          {step !== "select" && (
+            <div className="hidden md:flex items-center gap-1">
+              {STEPS.map((s, i) => {
+                const isActive = i === stepIndex;
+                const isDone = i < stepIndex;
+                return (
+                  <div key={s.key} className="flex items-center">
+                    <button
+                      onClick={() => {
+                        if (isDone) {
+                          setStep(s.key);
+                        }
+                      }}
+                      disabled={!isDone && !isActive}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-300 ${
+                        isActive
+                          ? "bg-primary text-primary-foreground shadow-md glow-emerald"
+                          : isDone
+                            ? "bg-primary/10 text-primary cursor-pointer hover:bg-primary/20"
+                            : "text-muted-foreground/50"
+                      }`}
+                    >
+                      <span
+                        className={`w-4.5 h-4.5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                          isActive
+                            ? "bg-primary-foreground/20"
+                            : isDone
+                              ? "bg-primary/20"
+                              : "bg-muted"
+                        }`}
+                      >
+                        {isDone ? "✓" : i + 1}
+                      </span>
+                      {s.label}
+                    </button>
+                    {i < STEPS.length - 1 && (
+                      <div
+                        className={`w-6 h-px mx-1 transition-colors duration-300 ${
+                          isDone ? "bg-primary/40" : "bg-border"
+                        }`}
+                      />
+                    )}
+                  </div>
+                );
+              })}
             </div>
+          )}
+
+          {/* Actions */}
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            {step !== "select" && (
+              <button
+                onClick={handleReset}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Nova traka
+              </button>
+            )}
           </div>
-        )}
+        </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 py-6">
-        {/* Step 1: Chart type selection */}
+      <main className="max-w-[1600px] mx-auto px-5">
+        {/* ═══ STEP 1: SELECT ═══ */}
         {step === "select" && (
-          <div className="max-w-3xl mx-auto">
-            <h2 className="text-2xl font-bold text-gray-900 mb-2 text-center">
-              Odaberite tip instrumenta
-            </h2>
-            <p className="text-gray-500 text-center mb-8">
-              Odaberite vrstu meteorološke trake koju želite digitalizirati
-            </p>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {CHART_OPTIONS.map((opt) => (
-                <Card
+          <div className="py-16 max-w-4xl mx-auto">
+            {/* Hero */}
+            <div className="text-center mb-14 animate-fade-in-up">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium mb-5">
+                <Layers className="w-3.5 h-3.5" />
+                Meteorološka digitalizacija
+              </div>
+              <h2 className="text-4xl md:text-5xl font-bold tracking-tight text-foreground mb-4">
+                Odaberite
+                <span className="bg-gradient-to-r from-emerald-500 to-teal-500 bg-clip-text text-transparent">
+                  {" "}instrument
+                </span>
+              </h2>
+              <p className="text-muted-foreground text-lg max-w-lg mx-auto leading-relaxed">
+                Pretvorite analogne meteorološke trake u digitalne podatke
+                s preciznošću instrumenta
+              </p>
+            </div>
+
+            {/* Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mb-16">
+              {CHART_OPTIONS.map((opt, i) => (
+                <button
                   key={opt.type}
-                  className="cursor-pointer hover:shadow-lg hover:border-green-400 transition-all group"
                   onClick={() => handleChartSelect(opt.type)}
+                  className="group relative text-left animate-fade-in-up"
+                  style={{ animationDelay: `${i * 80}ms` }}
                 >
-                  <CardContent className="flex flex-col items-center gap-3 py-8">
-                    <div className="text-gray-400 group-hover:text-green-600 transition-colors">
-                      {opt.icon}
+                  <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-card p-6 transition-all duration-300 hover:border-primary/30 hover:shadow-xl hover:-translate-y-1">
+                    {/* Gradient bg */}
+                    <div
+                      className={`absolute inset-0 bg-gradient-to-br ${opt.gradient} opacity-0 group-hover:opacity-100 transition-opacity duration-500`}
+                    />
+
+                    <div className="relative">
+                      {/* Icon */}
+                      <div className="w-12 h-12 rounded-xl bg-muted flex items-center justify-center text-muted-foreground group-hover:text-primary group-hover:bg-primary/10 transition-all duration-300 mb-5">
+                        {opt.icon}
+                      </div>
+
+                      {/* Text */}
+                      <h3 className="text-xl font-semibold text-foreground mb-1 tracking-tight">
+                        {opt.label}
+                      </h3>
+                      <p className="text-xs font-medium text-muted-foreground tracking-wider uppercase mb-3">
+                        {opt.sublabel}
+                      </p>
+                      <p className="text-sm text-muted-foreground mb-4">
+                        {opt.description}
+                      </p>
+
+                      {/* Range badge */}
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-lg bg-muted text-xs font-mono font-medium text-muted-foreground">
+                          {CHART_CONFIGS[opt.type].minValue}–
+                          {CHART_CONFIGS[opt.type].maxValue}{" "}
+                          {CHART_CONFIGS[opt.type].unit}
+                        </span>
+                        <ArrowRight className="w-4 h-4 text-muted-foreground/30 group-hover:text-primary group-hover:translate-x-1 transition-all duration-300" />
+                      </div>
                     </div>
-                    <h3 className="text-lg font-semibold">{opt.label}</h3>
-                    <p className="text-sm text-gray-500">{opt.description}</p>
-                    <div className="mt-2">
-                      <Badge variant="outline" className="text-xs">
-                        {CHART_CONFIGS[opt.type].minValue}–
-                        {CHART_CONFIGS[opt.type].maxValue} {CHART_CONFIGS[opt.type].unit}
-                      </Badge>
-                    </div>
-                  </CardContent>
-                </Card>
+                  </div>
+                </button>
               ))}
             </div>
 
-            {/* Preview */}
-            <div className="mt-12">
-              <h3 className="text-sm font-medium text-gray-500 mb-3 text-center">
-                Primjer predloška — Barograf
-              </h3>
-              <div className="bg-white rounded-xl p-4 shadow-sm border max-w-4xl mx-auto">
+            {/* Chart preview */}
+            <div
+              className="animate-fade-in-up"
+              style={{ animationDelay: "300ms" }}
+            >
+              <p className="text-xs font-medium text-muted-foreground text-center mb-3 uppercase tracking-wider">
+                Primjer predloška
+              </p>
+              <div className="bg-card border border-border/60 rounded-2xl p-5 shadow-sm max-w-5xl mx-auto">
                 <ChartSVG config={CHART_CONFIGS.barograph} />
               </div>
             </div>
           </div>
         )}
 
-        {/* Step 2: Image upload */}
+        {/* ═══ STEP 2: UPLOAD ═══ */}
         {step === "upload" && config && (
-          <div className="max-w-2xl mx-auto">
-            <div className="flex items-center gap-2 mb-6">
-              <Button variant="ghost" size="sm" onClick={() => setStep("select")}>
-                <ArrowLeft className="w-4 h-4 mr-1" />
-                Natrag
-              </Button>
-              <h2 className="text-xl font-bold">
-                Učitajte sliku — {config.label}
-              </h2>
-            </div>
+          <div className="py-12 max-w-2xl mx-auto animate-fade-in-up">
+            <button
+              onClick={() => setStep("select")}
+              className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors mb-8"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              Natrag
+            </button>
 
-            <div className="bg-white rounded-xl p-4 shadow-sm border mb-6">
-              <p className="text-xs text-gray-500 mb-2">
-                Predložak ({config.minValue}–{config.maxValue} {config.unit})
-              </p>
-              <div className={config.orientation === "landscape" ? "max-h-48" : "max-h-96 max-w-xs mx-auto"}>
+            <h2 className="text-3xl font-bold tracking-tight mb-2">
+              Učitajte traku
+            </h2>
+            <p className="text-muted-foreground mb-8">
+              Fotografija ili sken za{" "}
+              <span className="font-semibold text-foreground">
+                {config.label}
+              </span>{" "}
+              ({config.minValue}–{config.maxValue} {config.unit})
+            </p>
+
+            {/* Mini chart preview */}
+            <div className="bg-card border border-border/60 rounded-xl p-4 mb-8">
+              <div
+                className={
+                  config.orientation === "landscape"
+                    ? "max-h-40"
+                    : "max-h-64 max-w-[200px] mx-auto"
+                }
+              >
                 <ChartSVG config={config} />
               </div>
             </div>
@@ -234,51 +361,80 @@ export default function Home() {
           </div>
         )}
 
-        {/* Step 3: Calibration */}
+        {/* ═══ STEP 3: CALIBRATE ═══ */}
         {step === "calibrate" && config && imageUrl && (
-          <div>
+          <div className="py-5 animate-fade-in">
             <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <Button variant="ghost" size="sm" onClick={() => setStep("upload")}>
-                  <ArrowLeft className="w-4 h-4 mr-1" />
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={() => setStep("upload")}
+                  className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <ArrowLeft className="w-4 h-4" />
                   Natrag
-                </Button>
-                <h2 className="text-xl font-bold">Poravnanje slike</h2>
+                </button>
+                <div>
+                  <h2 className="text-xl font-bold tracking-tight">
+                    Kalibracija
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    Poravnajte sliku s predloškom
+                  </p>
+                </div>
               </div>
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <Crosshair className="w-4 h-4 text-red-500" />
-                  <span className="text-sm text-gray-600">
-                    Točke: {calibrationPoints.length}
+
+              <div className="flex items-center gap-4">
+                {/* SVG opacity control */}
+                <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-2">
+                  <Eye className="w-3.5 h-3.5 text-muted-foreground" />
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">
+                    Predložak
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={svgOpacity}
+                    onChange={(e) => setSvgOpacity(parseFloat(e.target.value))}
+                    className="w-28 slider-emerald"
+                  />
+                  <span className="text-xs font-mono text-muted-foreground w-8 text-right">
+                    {Math.round(svgOpacity * 100)}%
                   </span>
                 </div>
-                <Button onClick={() => setStep("digitize")} disabled={calibrationPoints.length < 3}>
-                  Nastavi na digitalizaciju
-                  <ArrowRight className="w-4 h-4 ml-1" />
-                </Button>
+
+                {/* Calibration point counter */}
+                <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-2">
+                  <Crosshair className="w-3.5 h-3.5 text-orange-500" />
+                  <span className="text-xs font-mono font-medium">
+                    {calibrationPoints.length}
+                  </span>
+                  <span className="text-xs text-muted-foreground">točaka</span>
+                </div>
+
+                <button
+                  onClick={() => setStep("digitize")}
+                  disabled={calibrationPoints.length < 3}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed bg-primary text-primary-foreground hover:opacity-90 shadow-md glow-emerald"
+                >
+                  Digitaliziraj
+                  <ArrowRight className="w-4 h-4" />
+                </button>
               </div>
             </div>
 
-            <p className="text-sm text-gray-500 mb-4">
-              Kliknite na poznate točke (kutovi, presjeci linija) za poravnanje slike s predloškom.
-              Min. 3 točke. Alt+klik za pomicanje, scroll za zoom.
+            <p className="text-xs text-muted-foreground mb-3">
+              Kliknite na poznate točke grafa (presjeci linija, kutovi). Min. 3.
+              <span className="text-foreground/60 ml-1">
+                Alt+klik pomicanje / Scroll zoom
+              </span>
             </p>
 
-            <div className="flex items-center gap-3 mb-4">
-              <span className="text-sm text-gray-600">Prozirnost slike:</span>
-              <input
-                type="range"
-                min={0} max={1} step={0.05}
-                value={imageOpacity}
-                onChange={(e) => setImageOpacity(parseFloat(e.target.value))}
-                className="w-48 accent-green-600"
-              />
-              <span className="text-sm text-gray-500 w-12">
-                {Math.round(imageOpacity * 100)}%
-              </span>
-            </div>
-
-            <div className="bg-white rounded-xl shadow-sm border" style={{ height: "70vh" }}>
+            <div
+              className="bg-card border border-border/60 rounded-2xl overflow-hidden shadow-lg"
+              style={{ height: "calc(100vh - 200px)" }}
+            >
               <OverlayCanvas
                 config={config}
                 imageUrl={imageUrl}
@@ -289,65 +445,82 @@ export default function Home() {
                 dataPoints={dataPoints}
                 onDataPointAdd={handleDataPointAdd}
                 onDataPointRemove={handleDataPointRemove}
-                imageOpacity={imageOpacity}
+                svgOpacity={svgOpacity}
               />
             </div>
           </div>
         )}
 
-        {/* Step 4: Digitize */}
+        {/* ═══ STEP 4: DIGITIZE ═══ */}
         {step === "digitize" && config && imageUrl && (
-          <div className="flex gap-4 h-[calc(100vh-160px)]">
-            <div className="flex-1 flex flex-col">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <Button variant="ghost" size="sm" onClick={() => setStep("calibrate")}>
-                    <ArrowLeft className="w-4 h-4 mr-1" />
-                    Poravnanje
-                  </Button>
-                  <h2 className="text-xl font-bold">Digitalizacija</h2>
-                  <Badge variant="outline" className="ml-2">{config.label}</Badge>
+          <div className="py-5 animate-fade-in">
+            <div className="flex gap-5 h-[calc(100vh-100px)]">
+              {/* Main canvas */}
+              <div className="flex-1 flex flex-col min-w-0">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-4">
+                    <button
+                      onClick={() => setStep("calibrate")}
+                      className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                    </button>
+                    <h2 className="text-xl font-bold tracking-tight">
+                      Digitalizacija
+                    </h2>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-primary/10 text-primary text-xs font-semibold">
+                      {config.label}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-1.5">
+                      <Eye className="w-3.5 h-3.5 text-muted-foreground" />
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={svgOpacity}
+                        onChange={(e) =>
+                          setSvgOpacity(parseFloat(e.target.value))
+                        }
+                        className="w-24 slider-emerald"
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-sm text-gray-600">Slika:</span>
-                  <input
-                    type="range"
-                    min={0} max={1} step={0.05}
-                    value={imageOpacity}
-                    onChange={(e) => setImageOpacity(parseFloat(e.target.value))}
-                    className="w-32 accent-green-600"
+
+                <div className="text-xs text-muted-foreground mb-2 flex items-center gap-1.5">
+                  <MousePointerClick className="w-3.5 h-3.5" />
+                  Kliknite na trag za očitavanje. Alt+klik pomicanje.
+                </div>
+
+                <div className="flex-1 bg-card border border-border/60 rounded-2xl overflow-hidden shadow-lg">
+                  <OverlayCanvas
+                    config={config}
+                    imageUrl={imageUrl}
+                    mode="digitize"
+                    calibrationPoints={calibrationPoints}
+                    onCalibrationPointAdd={handleCalibrationPointAdd}
+                    onCalibrationPointRemove={handleCalibrationPointRemove}
+                    dataPoints={dataPoints}
+                    onDataPointAdd={handleDataPointAdd}
+                    onDataPointRemove={handleDataPointRemove}
+                    svgOpacity={svgOpacity}
                   />
                 </div>
               </div>
 
-              <p className="text-sm text-gray-500 mb-3 flex items-center gap-1">
-                <MousePointerClick className="w-4 h-4" />
-                Kliknite na liniju traga za očitavanje vrijednosti. Alt+klik za pomicanje.
-              </p>
-
-              <div className="flex-1 bg-white rounded-xl shadow-sm border">
-                <OverlayCanvas
-                  config={config}
-                  imageUrl={imageUrl}
-                  mode="digitize"
-                  calibrationPoints={calibrationPoints}
-                  onCalibrationPointAdd={handleCalibrationPointAdd}
-                  onCalibrationPointRemove={handleCalibrationPointRemove}
+              {/* Data panel */}
+              <div className="w-[340px] flex-shrink-0 animate-slide-in-right">
+                <DataTable
                   dataPoints={dataPoints}
-                  onDataPointAdd={handleDataPointAdd}
-                  onDataPointRemove={handleDataPointRemove}
-                  imageOpacity={imageOpacity}
+                  config={config}
+                  onRemove={handleDataPointRemove}
+                  onUpdateValue={handleUpdateValue}
                 />
               </div>
-            </div>
-
-            <div className="w-80 flex-shrink-0">
-              <DataTable
-                dataPoints={dataPoints}
-                config={config}
-                onRemove={handleDataPointRemove}
-                onUpdateValue={handleUpdateValue}
-              />
             </div>
           </div>
         )}

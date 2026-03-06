@@ -3,7 +3,6 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 import { ChartConfig, CalibrationPoint, DataPoint } from "@/lib/types";
 import { canvasToValue, formatHour, getDayName } from "@/lib/chart-geometry";
-import { computeAffineTransform, imageToChart } from "@/lib/transform";
 import { ChartSVG } from "@/components/chart-template/ChartSVG";
 
 interface OverlayCanvasProps {
@@ -16,7 +15,7 @@ interface OverlayCanvasProps {
   dataPoints: DataPoint[];
   onDataPointAdd: (point: DataPoint) => void;
   onDataPointRemove: (id: string) => void;
-  imageOpacity: number;
+  svgOpacity: number;
 }
 
 export function OverlayCanvas({
@@ -29,7 +28,7 @@ export function OverlayCanvas({
   dataPoints,
   onDataPointAdd,
   onDataPointRemove,
-  imageOpacity,
+  svgOpacity,
 }: OverlayCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
@@ -44,26 +43,15 @@ export function OverlayCanvas({
     value: number;
   } | null>(null);
 
-  // Load image dimensions
   useEffect(() => {
     const img = new Image();
     img.onload = () => setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
     img.src = imageUrl;
   }, [imageUrl]);
 
-  // Compute the transform from calibration points
-  const transform = computeAffineTransform(calibrationPoints);
-
-  // Chart dimensions for the SVG overlay
   const isLandscape = config.orientation === "landscape";
-  const svgW = isLandscape
-    ? config.chartWidth + 36
-    : config.paperWidth + 19;
-  const svgH = isLandscape
-    ? config.chartHeight + 22
-    : config.paperHeight + 24;
-
-  // Use SVG dimensions as the base coordinate system
+  const svgW = isLandscape ? config.chartWidth + 36 : config.paperWidth + 19;
+  const svgH = isLandscape ? config.chartHeight + 22 : config.paperHeight + 24;
   const baseW = svgW;
   const baseH = svgH;
 
@@ -72,17 +60,10 @@ export function OverlayCanvas({
       e.preventDefault();
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
-
       const mouseX = e.clientX - rect.left;
       const mouseY = e.clientY - rect.top;
-
       const oldZoom = zoom;
-      const newZoom = Math.min(
-        20,
-        Math.max(0.5, zoom * (e.deltaY < 0 ? 1.15 : 0.87))
-      );
-
-      // Zoom toward cursor
+      const newZoom = Math.min(20, Math.max(0.5, zoom * (e.deltaY < 0 ? 1.15 : 0.87)));
       const scale = newZoom / oldZoom;
       setPan({
         x: mouseX - scale * (mouseX - pan.x),
@@ -96,7 +77,6 @@ export function OverlayCanvas({
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (e.button === 1 || (e.button === 0 && e.altKey)) {
-        // Middle click or Alt+click to pan
         setIsPanning(true);
         setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
         e.preventDefault();
@@ -108,31 +88,20 @@ export function OverlayCanvas({
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
       if (isPanning) {
-        setPan({
-          x: e.clientX - panStart.x,
-          y: e.clientY - panStart.y,
-        });
+        setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
         return;
       }
-
-      // Show cursor info in digitize mode
       if (mode === "digitize" && containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
         const svgX = (e.clientX - rect.left - pan.x) / zoom;
         const svgY = (e.clientY - rect.top - pan.y) / zoom;
-
-        // Convert SVG coords to chart coords (approximate)
         const marginL = isLandscape ? 18 : 5;
         const marginT = isLandscape ? 14 : 12;
         const chartX = svgX - marginL - (isLandscape ? 0 : config.marginStart);
-        const chartY = svgY - marginT - (isLandscape ? 0 : (config.paperHeight - config.chartHeight) / 2);
-
-        if (
-          chartX >= 0 && chartX <= config.chartWidth &&
-          chartY >= 0 && chartY <= config.chartHeight
-        ) {
-          const info = canvasToValue(chartX, chartY, config);
-          setCursorInfo(info);
+        const chartY =
+          svgY - marginT - (isLandscape ? 0 : (config.paperHeight - config.chartHeight) / 2);
+        if (chartX >= 0 && chartX <= config.chartWidth && chartY >= 0 && chartY <= config.chartHeight) {
+          setCursorInfo(canvasToValue(chartX, chartY, config));
         } else {
           setCursorInfo(null);
         }
@@ -150,35 +119,26 @@ export function OverlayCanvas({
       if (isPanning || e.altKey) return;
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
-
-      // Position in SVG coordinate space
       const svgX = (e.clientX - rect.left - pan.x) / zoom;
       const svgY = (e.clientY - rect.top - pan.y) / zoom;
 
       if (mode === "calibrate") {
-        // In calibration mode, clicking sets a point on the image
-        // User will need to specify the chart coordinate separately
-        const point: CalibrationPoint = {
+        onCalibrationPointAdd({
           id: `cal-${Date.now()}`,
           imgX: svgX,
           imgY: svgY,
-          chartX: svgX, // Will be adjusted via UI
+          chartX: svgX,
           chartY: svgY,
-        };
-        onCalibrationPointAdd(point);
+        });
       } else if (mode === "digitize") {
-        // Convert click position to chart value
         const marginL = isLandscape ? 18 : 5;
         const marginT = isLandscape ? 14 : 12;
         const chartX = svgX - marginL - (isLandscape ? 0 : config.marginStart);
-        const chartY = svgY - marginT - (isLandscape ? 0 : (config.paperHeight - config.chartHeight) / 2);
-
-        if (
-          chartX >= 0 && chartX <= config.chartWidth &&
-          chartY >= 0 && chartY <= config.chartHeight
-        ) {
+        const chartY =
+          svgY - marginT - (isLandscape ? 0 : (config.paperHeight - config.chartHeight) / 2);
+        if (chartX >= 0 && chartX <= config.chartWidth && chartY >= 0 && chartY <= config.chartHeight) {
           const { day, hour, value } = canvasToValue(chartX, chartY, config);
-          const point: DataPoint = {
+          onDataPointAdd({
             id: `dp-${Date.now()}`,
             canvasX: svgX,
             canvasY: svgY,
@@ -187,41 +147,40 @@ export function OverlayCanvas({
             value: Math.round(value * 10) / 10,
             dayLabel: getDayName(day),
             timeLabel: formatHour(hour),
-          };
-          onDataPointAdd(point);
+          });
         }
       }
     },
-    [
-      mode,
-      isPanning,
-      pan,
-      zoom,
-      config,
-      isLandscape,
-      onCalibrationPointAdd,
-      onDataPointAdd,
-    ]
+    [mode, isPanning, pan, zoom, config, isLandscape, onCalibrationPointAdd, onDataPointAdd]
   );
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-gray-100 rounded-lg">
-      {/* Cursor info bar */}
+    <div className="relative w-full h-full overflow-hidden bg-muted/30 rounded-2xl">
+      {/* Live readout */}
       {mode === "digitize" && cursorInfo && (
-        <div className="absolute top-2 left-2 z-20 bg-black/70 text-white text-xs px-3 py-1.5 rounded-md font-mono">
-          {getDayName(cursorInfo.day)} {formatHour(cursorInfo.hour)} ={" "}
-          {cursorInfo.value.toFixed(1)} {config.unit}
+        <div className="absolute top-3 left-3 z-20 glass rounded-lg px-3 py-1.5 animate-fade-in">
+          <span className="text-[11px] font-mono font-medium text-foreground">
+            {getDayName(cursorInfo.day)}{" "}
+            <span className="text-primary">{formatHour(cursorInfo.hour)}</span>
+            {" = "}
+            <span className="text-primary font-bold">
+              {cursorInfo.value.toFixed(1)}
+            </span>{" "}
+            <span className="text-muted-foreground">{config.unit}</span>
+          </span>
         </div>
       )}
 
-      {/* Zoom indicator */}
-      <div className="absolute top-2 right-2 z-20 bg-black/70 text-white text-xs px-2 py-1 rounded">
-        {Math.round(zoom * 100)}%
+      {/* Zoom badge */}
+      <div className="absolute top-3 right-3 z-20 glass rounded-lg px-2 py-1">
+        <span className="text-[10px] font-mono font-medium text-muted-foreground">
+          {Math.round(zoom * 100)}%
+        </span>
       </div>
 
       <div
         ref={containerRef}
-        className="w-full h-full cursor-crosshair"
+        className="w-full h-full cursor-precise"
         onWheel={handleWheel}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
@@ -238,7 +197,7 @@ export function OverlayCanvas({
             height: baseH,
           }}
         >
-          {/* Image layer */}
+          {/* IMAGE LAYER — always fully visible */}
           {imgSize.w > 0 && (
             <img
               src={imageUrl}
@@ -250,14 +209,14 @@ export function OverlayCanvas({
                 width: baseW,
                 height: baseH,
                 objectFit: "fill",
-                opacity: imageOpacity,
+                opacity: 1,
                 pointerEvents: "none",
               }}
               draggable={false}
             />
           )}
 
-          {/* Chart template SVG layer */}
+          {/* SVG TEMPLATE LAYER — opacity is adjustable */}
           <div
             style={{
               position: "absolute",
@@ -266,7 +225,8 @@ export function OverlayCanvas({
               width: baseW,
               height: baseH,
               pointerEvents: "none",
-              opacity: 0.85,
+              opacity: svgOpacity,
+              transition: "opacity 0.15s ease",
             }}
           >
             <ChartSVG config={config} />
@@ -274,17 +234,23 @@ export function OverlayCanvas({
 
           {/* Calibration points */}
           {mode === "calibrate" &&
-            calibrationPoints.map((p) => (
+            calibrationPoints.map((p, i) => (
               <div
                 key={p.id}
-                className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full border-2 border-red-500 bg-red-500/30 cursor-pointer hover:bg-red-500/60"
+                className="absolute -ml-[7px] -mt-[7px] group"
                 style={{ left: p.imgX, top: p.imgY }}
                 onClick={(e) => {
                   e.stopPropagation();
                   onCalibrationPointRemove(p.id);
                 }}
-                title="Kliknite za uklanjanje"
-              />
+              >
+                {/* Outer ring */}
+                <div className="w-[14px] h-[14px] rounded-full border-2 border-orange-400 bg-orange-400/20 cursor-pointer group-hover:bg-orange-400/50 transition-colors animate-pulse-glow" />
+                {/* Label */}
+                <span className="absolute -top-4 left-1/2 -translate-x-1/2 text-[9px] font-mono font-bold text-orange-400 bg-background/80 px-1 rounded">
+                  {i + 1}
+                </span>
+              </div>
             ))}
 
           {/* Data points */}
@@ -292,17 +258,29 @@ export function OverlayCanvas({
             dataPoints.map((p) => (
               <div
                 key={p.id}
-                className={`absolute w-2.5 h-2.5 -ml-[5px] -mt-[5px] rounded-full border border-blue-600 cursor-pointer
-                  ${hoveredPoint === p.id ? "bg-blue-600 scale-150" : "bg-blue-500/60"}`}
-                style={{ left: p.canvasX, top: p.canvasY, transition: "transform 0.1s" }}
+                className="absolute -ml-[5px] -mt-[5px] cursor-pointer group"
+                style={{ left: p.canvasX, top: p.canvasY }}
                 onMouseEnter={() => setHoveredPoint(p.id)}
                 onMouseLeave={() => setHoveredPoint(null)}
                 onClick={(e) => {
                   e.stopPropagation();
                   onDataPointRemove(p.id);
                 }}
-                title={`${p.dayLabel} ${p.timeLabel} = ${p.value} ${config.unit} (klik za brisanje)`}
-              />
+              >
+                <div
+                  className={`w-[10px] h-[10px] rounded-full border-2 transition-all duration-150 ${
+                    hoveredPoint === p.id
+                      ? "border-primary bg-primary scale-150 shadow-lg"
+                      : "border-primary bg-primary/40"
+                  }`}
+                />
+                {/* Hover tooltip */}
+                {hoveredPoint === p.id && (
+                  <div className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap glass rounded-md px-2 py-0.5 text-[9px] font-mono text-foreground shadow-lg pointer-events-none">
+                    {p.value.toFixed(1)} {config.unit}
+                  </div>
+                )}
+              </div>
             ))}
         </div>
       </div>
