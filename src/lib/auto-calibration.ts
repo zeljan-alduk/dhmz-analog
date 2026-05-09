@@ -457,6 +457,61 @@ async function rotateImageToBlobUrl(
   });
 }
 
+/**
+ * Compute the detection mask for an image and return it as a transparent PNG
+ * blob URL where mask=1 pixels are visible (tinted) and mask=0 pixels are
+ * transparent. Used by the UI to overlay the live mask on top of the scan so
+ * users can see which pixels their thresholds are selecting.
+ *
+ * Output canvas matches the natural image dimensions (downscaled to maxEdge=
+ * 1200 for performance — caller scales display via objectFit:fill).
+ */
+export async function computeGridMaskUrl(
+  imageUrl: string,
+  detection: Partial<DetectionConfig> = {},
+  tint: { r: number; g: number; b: number } = { r: 236, g: 72, b: 153 }
+): Promise<string> {
+  const cfg = { ...DEFAULTS, ...detection };
+  const img = await loadImage(imageUrl);
+  const maxEdge = 1200;
+  const scale = Math.min(
+    1,
+    maxEdge / Math.max(img.naturalWidth, img.naturalHeight)
+  );
+  const dw = Math.round(img.naturalWidth * scale);
+  const dh = Math.round(img.naturalHeight * scale);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = dw;
+  canvas.height = dh;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("canvas ctx");
+  ctx.drawImage(img, 0, 0, dw, dh);
+  const imgData = ctx.getImageData(0, 0, dw, dh);
+  const mask = buildGridMask(imgData, cfg);
+
+  // Build output: tinted pixels where mask=1, transparent elsewhere
+  const out = ctx.createImageData(dw, dh);
+  for (let i = 0; i < mask.length; i++) {
+    if (mask[i]) {
+      out.data[i * 4] = tint.r;
+      out.data[i * 4 + 1] = tint.g;
+      out.data[i * 4 + 2] = tint.b;
+      out.data[i * 4 + 3] = 220; // alpha
+    }
+  }
+  ctx.putImageData(out, 0, 0);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("toBlob null"));
+        return;
+      }
+      resolve(URL.createObjectURL(blob));
+    }, "image/png");
+  });
+}
+
 function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();

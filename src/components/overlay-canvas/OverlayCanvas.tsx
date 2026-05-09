@@ -10,7 +10,6 @@ import {
   valueToChart,
 } from "@/lib/chart-geometry";
 import { imageToChart } from "@/lib/transform";
-import { ChartSVG } from "@/components/chart-template/ChartSVG";
 import { CalibrationDialog } from "@/components/calibration-dialog/CalibrationDialog";
 
 interface OverlayCanvasProps {
@@ -23,7 +22,10 @@ interface OverlayCanvasProps {
   dataPoints: DataPoint[];
   onDataPointAdd: (point: DataPoint) => void;
   onDataPointRemove: (id: string) => void;
-  svgOpacity: number;
+  /** Detection mask blob URL (highlights detected grid pixels). */
+  maskUrl?: string | null;
+  /** Mask overlay opacity 0–1. */
+  maskOpacity?: number;
   /** Forward affine matrix (image-px → chart-mm). 6 numbers: [a,b,c,d,e,f]. */
   affineMatrix?: number[] | null;
 }
@@ -38,7 +40,8 @@ export function OverlayCanvas({
   dataPoints,
   onDataPointAdd,
   onDataPointRemove,
-  svgOpacity,
+  maskUrl,
+  maskOpacity = 0,
   affineMatrix,
 }: OverlayCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -320,21 +323,28 @@ export function OverlayCanvas({
             />
           )}
 
-          {/* SVG TEMPLATE LAYER */}
-          <div
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              width: baseW,
-              height: baseH,
-              pointerEvents: "none",
-              opacity: svgOpacity,
-              transition: "opacity 0.15s ease",
-            }}
-          >
-            <ChartSVG config={config} />
-          </div>
+          {/* DETECTION MASK LAYER — colored overlay of pixels matched by the
+              current detection thresholds. Sits on top of the scan so the user
+              can see exactly which pixels are being included. */}
+          {maskUrl && maskOpacity > 0 && (
+            <img
+              src={maskUrl}
+              alt=""
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: baseW,
+                height: baseH,
+                objectFit: "fill",
+                opacity: maskOpacity,
+                pointerEvents: "none",
+                mixBlendMode: "multiply",
+                transition: "opacity 0.15s ease",
+              }}
+              draggable={false}
+            />
+          )}
 
           {/* Calibration points */}
           {mode === "calibrate" &&

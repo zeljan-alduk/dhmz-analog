@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import {
   ChartType,
   CalibrationPoint,
@@ -11,6 +11,7 @@ import { CHART_CONFIGS, getDisplaySize } from "@/lib/chart-geometry";
 import { computeAffineTransform } from "@/lib/transform";
 import {
   runAutoCalibration,
+  computeGridMaskUrl,
   type AutoCalibrationResult,
   type DetectionConfig,
   DETECTION_DEFAULTS,
@@ -112,10 +113,18 @@ function ThemeToggle() {
 export default function Home() {
   const [step, setStep] = useState<WorkflowStep>("select");
   const [chartType, setChartType] = useState<ChartType | null>(null);
+  // Original (unrotated) blob URL — set once on upload, never changed by
+  // rotation controls.
+  const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
+  // Rotation in degrees — combined coarse (90° buttons) and fine (slider).
+  const [rotationAngle, setRotationAngle] = useState(0);
+  // Derived: originalImageUrl rotated by rotationAngle. Updated by an effect.
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [calibrationPoints, setCalibrationPoints] = useState<CalibrationPoint[]>([]);
   const [dataPoints, setDataPoints] = useState<DataPoint[]>([]);
-  const [svgOpacity, setSvgOpacity] = useState(0.6);
+  // Detection mask overlay opacity (replaces the old SVG-template overlay).
+  const [maskOpacity, setMaskOpacity] = useState(0.5);
+  const [maskUrl, setMaskUrl] = useState<string | null>(null);
 
   const config = chartType ? CHART_CONFIGS[chartType] : null;
 
@@ -134,6 +143,7 @@ export default function Home() {
     | { kind: "success"; result: AutoCalibrationResult }
     | { kind: "fail"; message: string }
   >({ kind: "idle" });
+  const hasRunAutoCalRef = useRef(false);
 
   // ─── Detection config (live-tunable thresholds) ───────────────────
   const [detectionConfig, setDetectionConfig] = useState<DetectionConfig>(
@@ -143,6 +153,7 @@ export default function Home() {
 
   const handleAutoCalibrate = useCallback(async () => {
     if (!imageUrl || !config) return;
+    hasRunAutoCalRef.current = true;
     setAutoCalState({ kind: "running" });
     try {
       // Must match OverlayCanvas's display dimensions exactly — getDisplaySize
@@ -187,51 +198,121 @@ export default function Home() {
     }
   }, [imageUrl, config, detectionConfig]);
 
-  const handleRotateImage = useCallback(
-    async (degrees: 90 | -90 | 180) => {
-      if (!imageUrl) return;
-      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const i = new Image();
-        i.crossOrigin = "anonymous";
-        i.onload = () => resolve(i);
-        i.onerror = () => reject(new Error("load failed"));
-        i.src = imageUrl;
-      });
-      const w = img.naturalWidth;
-      const h = img.naturalHeight;
-      const canvas = document.createElement("canvas");
-      const isQuarter = degrees === 90 || degrees === -90;
-      canvas.width = isQuarter ? h : w;
-      canvas.height = isQuarter ? w : h;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      if (degrees === 90) {
-        ctx.translate(h, 0);
-        ctx.rotate(Math.PI / 2);
-      } else if (degrees === -90) {
-        ctx.translate(0, w);
-        ctx.rotate(-Math.PI / 2);
-      } else {
-        // 180°
-        ctx.translate(w, h);
-        ctx.rotate(Math.PI);
+  // ─── Rotation: recompute imageUrl from originalImageUrl + rotationAngle ──
+  // The rotation angle includes both coarse (90° buttons) and fine (slider)
+  // adjustments. Always rotates the ORIGINAL image, so dragging the slider
+  // doesn't accumulate compounding round-trips through PNG encoding.
+  useEffect(() => {
+    if (!originalImageUrl) {
+      setImageUrl(null);
+      return;
+    }
+    if (rotationAngle === 0) {
+      setImageUrl(originalImageUrl);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const i = new Image();
+          i.onload = () => resolve(i);
+          i.onerror = () => reject(new Error("rotate: load failed"));
+          i.src = originalImageUrl;
+        });
+        const w = img.naturalWidth;
+        const h = img.naturalHeight;
+        const rad = (rotationAngle * Math.PI) / 180;
+        const cosA = Math.abs(Math.cos(rad));
+        const sinA = Math.abs(Math.sin(rad));
+        const newW = Math.round(w * cosA + h * sinA);
+        const newH = Math.round(w * sinA + h * cosA);
+        const canvas = document.createElement("canvas");
+        canvas.width = newW;
+        canvas.height = newH;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, newW, newH);
+        ctx.translate(newW / 2, newH / 2);
+        ctx.rotate(rad);
+        ctx.drawImage(img, -w / 2, -h / 2);
+        const blob: Blob | null = await new Promise((r) =>
+          canvas.toBlob(r, "image/png")
+        );
+        if (cancelled || !blob) return;
+        const newUrl = URL.createObjectURL(blob);
+        setImageUrl((prev) => {
+          if (prev && prev !== originalImageUrl && prev !== newUrl) {
+            URL.revokeObjectURL(prev);
+          }
+          return newUrl;
+        });
+        // New rotation invalidates calibration corners
+        setCalibrationPoints([]);
+      } catch (e) {
+        console.error("rotation failed", e);
       }
-      ctx.drawImage(img, 0, 0);
-      const blob: Blob | null = await new Promise((r) =>
-        canvas.toBlob(r, "image/png")
-      );
-      if (!blob) return;
-      const newUrl = URL.createObjectURL(blob);
-      const previousUrl = imageUrl;
-      setImageUrl(newUrl);
-      // Clear calibration — corners are no longer valid in the rotated image's
-      // coordinate system.
-      setCalibrationPoints([]);
-      setAutoCalState({ kind: "idle" });
-      if (previousUrl.startsWith("blob:")) URL.revokeObjectURL(previousUrl);
-    },
-    [imageUrl]
-  );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [originalImageUrl, rotationAngle]);
+
+  /** Coarse 90°/180° buttons: bump rotationAngle and let the effect recompute. */
+  const handleRotateBy = useCallback((delta: 90 | -90 | 180) => {
+    setRotationAngle((a) => {
+      const next = a + delta;
+      // Normalize to (-180, 180]
+      let n = next % 360;
+      if (n > 180) n -= 360;
+      if (n <= -180) n += 360;
+      return n;
+    });
+    setAutoCalState({ kind: "idle" });
+  }, []);
+
+  // ─── Mask overlay: recompute whenever the image or detection config change ──
+  useEffect(() => {
+    if (!imageUrl || step !== "calibrate") {
+      if (maskUrl && maskUrl.startsWith("blob:")) URL.revokeObjectURL(maskUrl);
+      setMaskUrl(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      computeGridMaskUrl(imageUrl, detectionConfig)
+        .then((url) => {
+          if (cancelled) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+          setMaskUrl((prev) => {
+            if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+            return url;
+          });
+        })
+        .catch((e) => console.error("mask compute failed", e));
+    }, 80);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageUrl, JSON.stringify(detectionConfig), step]);
+
+  // ─── Auto-redetect on detection-config changes (debounced) ───────────────
+  // Only fires AFTER the user has run auto-detect at least once — until then,
+  // sliders just update the live mask preview.
+  useEffect(() => {
+    if (!hasRunAutoCalRef.current) return;
+    if (!imageUrl || !config || step !== "calibrate") return;
+    const t = setTimeout(() => {
+      handleAutoCalibrate();
+    }, 350);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(detectionConfig)]);
 
   const handleChartSelect = (type: ChartType) => {
     setChartType(type);
@@ -240,7 +321,8 @@ export default function Home() {
 
   const handleImageSelected = (file: File) => {
     const url = URL.createObjectURL(file);
-    setImageUrl(url);
+    setOriginalImageUrl(url);
+    setRotationAngle(0);
     setStep("calibrate");
   };
 
@@ -269,8 +351,19 @@ export default function Home() {
   const handleReset = () => {
     setStep("select");
     setChartType(null);
-    if (imageUrl) URL.revokeObjectURL(imageUrl);
+    if (imageUrl && imageUrl.startsWith("blob:")) URL.revokeObjectURL(imageUrl);
+    if (
+      originalImageUrl &&
+      originalImageUrl !== imageUrl &&
+      originalImageUrl.startsWith("blob:")
+    ) {
+      URL.revokeObjectURL(originalImageUrl);
+    }
+    if (maskUrl && maskUrl.startsWith("blob:")) URL.revokeObjectURL(maskUrl);
     setImageUrl(null);
+    setOriginalImageUrl(null);
+    setRotationAngle(0);
+    setMaskUrl(null);
     setCalibrationPoints([]);
     setDataPoints([]);
     setAutoCalState({ kind: "idle" });
@@ -515,7 +608,7 @@ export default function Home() {
                 {/* Rotate scan: clears calibration so user can re-run auto-detect */}
                 <div className="flex items-center gap-1 bg-card border border-border/60 rounded-xl px-2 py-1">
                   <button
-                    onClick={() => handleRotateImage(-90)}
+                    onClick={() => handleRotateBy(-90)}
                     disabled={autoCalState.kind === "running"}
                     className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
                     title="Zarotiraj 90° ulijevo"
@@ -524,7 +617,7 @@ export default function Home() {
                     <RotateCcw className="w-3.5 h-3.5" />
                   </button>
                   <button
-                    onClick={() => handleRotateImage(180)}
+                    onClick={() => handleRotateBy(180)}
                     disabled={autoCalState.kind === "running"}
                     className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
                     title="Zarotiraj 180° (naopako)"
@@ -533,13 +626,52 @@ export default function Home() {
                     <FlipVertical className="w-3.5 h-3.5" />
                   </button>
                   <button
-                    onClick={() => handleRotateImage(90)}
+                    onClick={() => handleRotateBy(90)}
                     disabled={autoCalState.kind === "running"}
                     className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
                     title="Zarotiraj 90° udesno"
                     type="button"
                   >
                     <RotateCw className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {/* Fine angle slider — ~3 arc-minute precision */}
+                <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-2">
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">
+                    Kut
+                  </span>
+                  <input
+                    type="range"
+                    min={-180}
+                    max={180}
+                    step={0.05}
+                    value={rotationAngle}
+                    onChange={(e) =>
+                      setRotationAngle(parseFloat(e.target.value))
+                    }
+                    className="w-32 slider-emerald"
+                  />
+                  <input
+                    type="number"
+                    min={-180}
+                    max={180}
+                    step={0.01}
+                    value={rotationAngle.toFixed(2)}
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value);
+                      if (!Number.isNaN(v)) setRotationAngle(v);
+                    }}
+                    className="w-16 bg-muted/40 border border-border rounded-md px-1.5 py-0.5 text-xs font-mono font-medium text-right focus:outline-none focus:ring-1 focus:ring-primary/40"
+                  />
+                  <span className="text-xs text-muted-foreground">°</span>
+                  <button
+                    onClick={() => setRotationAngle(0)}
+                    className="ml-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                    title="Resetiraj kut"
+                    type="button"
+                  >
+                    0°
                   </button>
                 </div>
 
@@ -556,23 +688,23 @@ export default function Home() {
                     : "Auto-detect"}
                 </button>
 
-                {/* SVG opacity control */}
+                {/* Detection mask overlay opacity (replaces old Predložak) */}
                 <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-2">
                   <Eye className="w-3.5 h-3.5 text-muted-foreground" />
                   <span className="text-xs text-muted-foreground whitespace-nowrap">
-                    Predložak
+                    Detekcija
                   </span>
                   <input
                     type="range"
                     min={0}
                     max={1}
                     step={0.05}
-                    value={svgOpacity}
-                    onChange={(e) => setSvgOpacity(parseFloat(e.target.value))}
+                    value={maskOpacity}
+                    onChange={(e) => setMaskOpacity(parseFloat(e.target.value))}
                     className="w-28 slider-emerald"
                   />
                   <span className="text-xs font-mono text-muted-foreground w-8 text-right">
-                    {Math.round(svgOpacity * 100)}%
+                    {Math.round(maskOpacity * 100)}%
                   </span>
                 </div>
 
@@ -726,7 +858,8 @@ export default function Home() {
                 dataPoints={dataPoints}
                 onDataPointAdd={handleDataPointAdd}
                 onDataPointRemove={handleDataPointRemove}
-                svgOpacity={svgOpacity}
+                maskUrl={maskUrl}
+                maskOpacity={maskOpacity}
                 affineMatrix={affineMatrix}
               />
             </div>
@@ -758,14 +891,17 @@ export default function Home() {
                   <div className="flex items-center gap-3">
                     <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-1.5">
                       <Eye className="w-3.5 h-3.5 text-muted-foreground" />
+                      <span className="text-xs text-muted-foreground">
+                        Detekcija
+                      </span>
                       <input
                         type="range"
                         min={0}
                         max={1}
                         step={0.05}
-                        value={svgOpacity}
+                        value={maskOpacity}
                         onChange={(e) =>
-                          setSvgOpacity(parseFloat(e.target.value))
+                          setMaskOpacity(parseFloat(e.target.value))
                         }
                         className="w-24 slider-emerald"
                       />
@@ -789,7 +925,8 @@ export default function Home() {
                     dataPoints={dataPoints}
                     onDataPointAdd={handleDataPointAdd}
                     onDataPointRemove={handleDataPointRemove}
-                    svgOpacity={svgOpacity}
+                    maskUrl={maskUrl}
+                    maskOpacity={maskOpacity}
                     affineMatrix={affineMatrix}
                   />
                 </div>
