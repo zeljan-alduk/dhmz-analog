@@ -125,6 +125,7 @@ export default function Home() {
   // Detection mask overlay opacity (replaces the old SVG-template overlay).
   const [maskOpacity, setMaskOpacity] = useState(0.5);
   const [maskUrl, setMaskUrl] = useState<string | null>(null);
+  const [isRotating, setIsRotating] = useState(false);
 
   const config = chartType ? CHART_CONFIGS[chartType] : null;
 
@@ -223,9 +224,11 @@ export default function Home() {
     }
     if (rotationAngle === 0) {
       setImageUrl(originalImageUrl);
+      setIsRotating(false);
       return;
     }
     let cancelled = false;
+    setIsRotating(true);
     (async () => {
       try {
         const img = await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -234,6 +237,7 @@ export default function Home() {
           i.onerror = () => reject(new Error("rotate: load failed"));
           i.src = originalImageUrl;
         });
+        if (cancelled) return;
         const w = img.naturalWidth;
         const h = img.naturalHeight;
         const rad = (rotationAngle * Math.PI) / 180;
@@ -266,6 +270,8 @@ export default function Home() {
         setCalibrationPoints([]);
       } catch (e) {
         console.error("rotation failed", e);
+      } finally {
+        if (!cancelled) setIsRotating(false);
       }
     })();
     return () => {
@@ -343,9 +349,47 @@ export default function Home() {
     setStep("upload");
   };
 
-  const handleImageSelected = (file: File) => {
-    const url = URL.createObjectURL(file);
-    setOriginalImageUrl(url);
+  const handleImageSelected = async (file: File) => {
+    // Downscale on ingest. Plustek 320e scans land at ~50 MB / 9992 px long
+    // edge — rotating that with canvas every slider tick is too slow. Cap the
+    // working image at maxEdge=4000 px which is still far above the
+    // detection downscale (1200 px) and gives plenty of zoom headroom for
+    // clicking on the trace.
+    const maxEdge = 4000;
+    const objectUrl = URL.createObjectURL(file);
+    let workingUrl = objectUrl;
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = () => reject(new Error("load failed"));
+        i.src = objectUrl;
+      });
+      const longest = Math.max(img.naturalWidth, img.naturalHeight);
+      if (longest > maxEdge) {
+        const scale = maxEdge / longest;
+        const dw = Math.round(img.naturalWidth * scale);
+        const dh = Math.round(img.naturalHeight * scale);
+        const c = document.createElement("canvas");
+        c.width = dw;
+        c.height = dh;
+        const ctx = c.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, dw, dh);
+          const blob: Blob | null = await new Promise((r) =>
+            c.toBlob(r, "image/png")
+          );
+          if (blob) {
+            workingUrl = URL.createObjectURL(blob);
+            // The full-res object URL is no longer needed.
+            URL.revokeObjectURL(objectUrl);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("downscale failed, using original", e);
+    }
+    setOriginalImageUrl(workingUrl);
     setRotationAngle(0);
     setStep("calibrate");
   };
@@ -662,8 +706,14 @@ export default function Home() {
 
                 {/* Fine angle slider — ~3 arc-minute precision */}
                 <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-2">
-                  <span className="text-xs text-muted-foreground whitespace-nowrap">
-                    Kut
+                  <span
+                    className={`text-xs whitespace-nowrap transition-colors ${
+                      isRotating
+                        ? "text-primary animate-pulse"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {isRotating ? "Rotiranje…" : "Kut"}
                   </span>
                   <input
                     type="range"
