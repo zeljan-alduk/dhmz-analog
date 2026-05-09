@@ -6,6 +6,7 @@ import {
   canvasToValue,
   formatHour,
   getDayName,
+  getDisplaySize,
   valueToChart,
 } from "@/lib/chart-geometry";
 import { imageToChart } from "@/lib/transform";
@@ -66,33 +67,40 @@ export function OverlayCanvas({
   }, [imageUrl]);
 
   const isLandscape = config.orientation === "landscape";
-  const svgW = isLandscape ? config.chartWidth + 36 : config.paperWidth + 19;
-  const svgH = isLandscape ? config.chartHeight + 22 : config.paperHeight + 24;
-  const baseW = svgW;
-  const baseH = svgH;
+  const { w: baseW, h: baseH } = getDisplaySize(config);
 
-  // Layout offsets that translate svg-canvas px → chart-mm origin (used as
-  // a fallback when no affine has been computed yet).
-  const marginL = isLandscape ? 18 : 5;
-  const marginT = isLandscape ? 14 : 12;
-  const portraitMarginX = isLandscape ? 0 : config.marginStart;
-  const portraitMarginY = isLandscape
-    ? 0
-    : (config.paperHeight - config.chartHeight) / 2;
+  // Layout offsets used by the FALLBACK chart-mm mapping (when no calibration
+  // has been set yet). Authored in chart-mm but multiplied up to display
+  // pixels so the comparison with svgX/svgY (also display pixels) is correct.
+  // After calibration, the affine matrix takes over and these are unused.
+  const DISPLAY_SCALE = baseW / (isLandscape
+    ? config.chartWidth + 36
+    : config.paperWidth + 19);
+  const marginL = (isLandscape ? 18 : 5) * DISPLAY_SCALE;
+  const marginT = (isLandscape ? 14 : 12) * DISPLAY_SCALE;
+  const portraitMarginX = (isLandscape ? 0 : config.marginStart) * DISPLAY_SCALE;
+  const portraitMarginY =
+    (isLandscape ? 0 : (config.paperHeight - config.chartHeight) / 2) *
+    DISPLAY_SCALE;
 
-  /** Map a click on the canvas (svgX, svgY) to chart-mm. */
+  /** Map a click on the canvas (svgX, svgY in display pixels) to chart-mm. */
   const canvasToChartMm = useCallback(
     (svgX: number, svgY: number): { chartX: number; chartY: number } | null => {
       if (affineMatrix) {
+        // Affine maps display-pixel → chart-mm directly (calibration corners
+        // are stored in display-pixel space, so the matrix accounts for any
+        // DISPLAY_SCALE used at that time).
         const { chartX, chartY } = imageToChart(svgX, svgY, affineMatrix);
         return { chartX, chartY };
       }
-      // Fallback: assume the image is already roughly aligned with the SVG template
-      const chartX = svgX - marginL - portraitMarginX;
-      const chartY = svgY - marginT - portraitMarginY;
+      // Fallback: assume the image is roughly aligned with the SVG template.
+      // Subtract margins (already in display pixels) and divide by scale to
+      // recover chart-mm.
+      const chartX = (svgX - marginL - portraitMarginX) / DISPLAY_SCALE;
+      const chartY = (svgY - marginT - portraitMarginY) / DISPLAY_SCALE;
       return { chartX, chartY };
     },
-    [affineMatrix, marginL, marginT, portraitMarginX, portraitMarginY]
+    [affineMatrix, marginL, marginT, portraitMarginX, portraitMarginY, DISPLAY_SCALE]
   );
 
   const handleWheel = useCallback(

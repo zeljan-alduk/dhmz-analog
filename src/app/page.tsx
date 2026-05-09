@@ -7,7 +7,7 @@ import {
   DataPoint,
   WorkflowStep,
 } from "@/lib/types";
-import { CHART_CONFIGS } from "@/lib/chart-geometry";
+import { CHART_CONFIGS, getDisplaySize } from "@/lib/chart-geometry";
 import { computeAffineTransform } from "@/lib/transform";
 import {
   runAutoCalibration,
@@ -133,12 +133,9 @@ export default function Home() {
     if (!imageUrl || !config) return;
     setAutoCalState({ kind: "running" });
     try {
-      // Display dimensions used by OverlayCanvas — must match its computation.
-      const isLandscape = config.orientation === "landscape";
-      const baseW = isLandscape ? config.chartWidth + 36 : config.paperWidth + 19;
-      const baseH = isLandscape
-        ? config.chartHeight + 22
-        : config.paperHeight + 24;
+      // Must match OverlayCanvas's display dimensions exactly — getDisplaySize
+      // is the single source of truth for the (DISPLAY_SCALE × mm) sizing.
+      const { w: baseW, h: baseH } = getDisplaySize(config);
 
       const result = await runAutoCalibration(imageUrl, config, baseW, baseH);
       if (!result) {

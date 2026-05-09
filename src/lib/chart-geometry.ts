@@ -1,5 +1,27 @@
 import { ChartConfig, ChartType } from "./types";
 
+/**
+ * Pixels per chart-mm in the OverlayCanvas display layer. The underlying
+ * geometry is in millimetres (Lambrecht paper sizes), but rendering at 1px/mm
+ * makes the chart unusably small (~349×98 for a landscape barograph). 4×
+ * fills a typical desktop viewport while preserving aspect ratio. Both
+ * OverlayCanvas (display) and page.tsx (auto-cal display dims) must use this
+ * same multiplier so calibration corners land in the same coordinate system
+ * the user sees.
+ */
+export const DISPLAY_SCALE = 4;
+
+/**
+ * Compute the OverlayCanvas display dimensions for a given chart config.
+ * Returns pixel sizes already scaled by DISPLAY_SCALE.
+ */
+export function getDisplaySize(config: ChartConfig): { w: number; h: number } {
+  const isLandscape = config.orientation === "landscape";
+  const svgW = isLandscape ? config.chartWidth + 36 : config.paperWidth + 19;
+  const svgH = isLandscape ? config.chartHeight + 22 : config.paperHeight + 24;
+  return { w: svgW * DISPLAY_SCALE, h: svgH * DISPLAY_SCALE };
+}
+
 export const CHART_CONFIGS: Record<ChartType, ChartConfig> = {
   barograph: {
     type: "barograph",
