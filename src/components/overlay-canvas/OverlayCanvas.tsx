@@ -2,8 +2,15 @@
 
 import { useRef, useState, useCallback, useEffect } from "react";
 import { ChartConfig, CalibrationPoint, DataPoint } from "@/lib/types";
-import { canvasToValue, formatHour, getDayName } from "@/lib/chart-geometry";
+import {
+  canvasToValue,
+  formatHour,
+  getDayName,
+  valueToChart,
+} from "@/lib/chart-geometry";
+import { imageToChart } from "@/lib/transform";
 import { ChartSVG } from "@/components/chart-template/ChartSVG";
+import { CalibrationDialog } from "@/components/calibration-dialog/CalibrationDialog";
 
 interface OverlayCanvasProps {
   config: ChartConfig;
@@ -16,6 +23,8 @@ interface OverlayCanvasProps {
   onDataPointAdd: (point: DataPoint) => void;
   onDataPointRemove: (id: string) => void;
   svgOpacity: number;
+  /** Forward affine matrix (image-px → chart-mm). 6 numbers: [a,b,c,d,e,f]. */
+  affineMatrix?: number[] | null;
 }
 
 export function OverlayCanvas({
@@ -29,6 +38,7 @@ export function OverlayCanvas({
   onDataPointAdd,
   onDataPointRemove,
   svgOpacity,
+  affineMatrix,
 }: OverlayCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
@@ -43,6 +53,12 @@ export function OverlayCanvas({
     value: number;
   } | null>(null);
 
+  // Calibration dialog state — holds the click while user enters chart coords
+  const [pendingCalibration, setPendingCalibration] = useState<{
+    imgX: number;
+    imgY: number;
+  } | null>(null);
+
   useEffect(() => {
     const img = new Image();
     img.onload = () => setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
@@ -54,6 +70,30 @@ export function OverlayCanvas({
   const svgH = isLandscape ? config.chartHeight + 22 : config.paperHeight + 24;
   const baseW = svgW;
   const baseH = svgH;
+
+  // Layout offsets that translate svg-canvas px → chart-mm origin (used as
+  // a fallback when no affine has been computed yet).
+  const marginL = isLandscape ? 18 : 5;
+  const marginT = isLandscape ? 14 : 12;
+  const portraitMarginX = isLandscape ? 0 : config.marginStart;
+  const portraitMarginY = isLandscape
+    ? 0
+    : (config.paperHeight - config.chartHeight) / 2;
+
+  /** Map a click on the canvas (svgX, svgY) to chart-mm. */
+  const canvasToChartMm = useCallback(
+    (svgX: number, svgY: number): { chartX: number; chartY: number } | null => {
+      if (affineMatrix) {
+        const { chartX, chartY } = imageToChart(svgX, svgY, affineMatrix);
+        return { chartX, chartY };
+      }
+      // Fallback: assume the image is already roughly aligned with the SVG template
+      const chartX = svgX - marginL - portraitMarginX;
+      const chartY = svgY - marginT - portraitMarginY;
+      return { chartX, chartY };
+    },
+    [affineMatrix, marginL, marginT, portraitMarginX, portraitMarginY]
+  );
 
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
@@ -95,19 +135,21 @@ export function OverlayCanvas({
         const rect = containerRef.current.getBoundingClientRect();
         const svgX = (e.clientX - rect.left - pan.x) / zoom;
         const svgY = (e.clientY - rect.top - pan.y) / zoom;
-        const marginL = isLandscape ? 18 : 5;
-        const marginT = isLandscape ? 14 : 12;
-        const chartX = svgX - marginL - (isLandscape ? 0 : config.marginStart);
-        const chartY =
-          svgY - marginT - (isLandscape ? 0 : (config.paperHeight - config.chartHeight) / 2);
-        if (chartX >= 0 && chartX <= config.chartWidth && chartY >= 0 && chartY <= config.chartHeight) {
-          setCursorInfo(canvasToValue(chartX, chartY, config));
+        const mm = canvasToChartMm(svgX, svgY);
+        if (
+          mm &&
+          mm.chartX >= 0 &&
+          mm.chartX <= config.chartWidth &&
+          mm.chartY >= 0 &&
+          mm.chartY <= config.chartHeight
+        ) {
+          setCursorInfo(canvasToValue(mm.chartX, mm.chartY, config));
         } else {
           setCursorInfo(null);
         }
       }
     },
-    [isPanning, panStart, mode, zoom, pan, config, isLandscape]
+    [isPanning, panStart, mode, zoom, pan, config, canvasToChartMm]
   );
 
   const handleMouseUp = useCallback(() => {
@@ -123,21 +165,18 @@ export function OverlayCanvas({
       const svgY = (e.clientY - rect.top - pan.y) / zoom;
 
       if (mode === "calibrate") {
-        onCalibrationPointAdd({
-          id: `cal-${Date.now()}`,
-          imgX: svgX,
-          imgY: svgY,
-          chartX: svgX,
-          chartY: svgY,
-        });
+        // Defer adding the point until the user identifies it via the dialog.
+        setPendingCalibration({ imgX: svgX, imgY: svgY });
       } else if (mode === "digitize") {
-        const marginL = isLandscape ? 18 : 5;
-        const marginT = isLandscape ? 14 : 12;
-        const chartX = svgX - marginL - (isLandscape ? 0 : config.marginStart);
-        const chartY =
-          svgY - marginT - (isLandscape ? 0 : (config.paperHeight - config.chartHeight) / 2);
-        if (chartX >= 0 && chartX <= config.chartWidth && chartY >= 0 && chartY <= config.chartHeight) {
-          const { day, hour, value } = canvasToValue(chartX, chartY, config);
+        const mm = canvasToChartMm(svgX, svgY);
+        if (
+          mm &&
+          mm.chartX >= 0 &&
+          mm.chartX <= config.chartWidth &&
+          mm.chartY >= 0 &&
+          mm.chartY <= config.chartHeight
+        ) {
+          const { day, hour, value } = canvasToValue(mm.chartX, mm.chartY, config);
           onDataPointAdd({
             id: `dp-${Date.now()}`,
             canvasX: svgX,
@@ -151,8 +190,49 @@ export function OverlayCanvas({
         }
       }
     },
-    [mode, isPanning, pan, zoom, config, isLandscape, onCalibrationPointAdd, onDataPointAdd]
+    [mode, isPanning, pan, zoom, config, canvasToChartMm, onDataPointAdd]
   );
+
+  const handleConfirmCalibration = useCallback(
+    (data: { day: number; hour: number; value: number }) => {
+      if (!pendingCalibration) return;
+      const { chartX, chartY } = valueToChart(
+        data.day,
+        data.hour,
+        data.value,
+        config
+      );
+      onCalibrationPointAdd({
+        id: `cal-${Date.now()}`,
+        imgX: pendingCalibration.imgX,
+        imgY: pendingCalibration.imgY,
+        chartX,
+        chartY,
+        meta: data,
+      });
+      setPendingCalibration(null);
+    },
+    [pendingCalibration, config, onCalibrationPointAdd]
+  );
+
+  // Suggested defaults for the dialog: snap the click to the nearest grid
+  // intersection in the (untransformed) template space.
+  const dialogInitial = pendingCalibration
+    ? (() => {
+        const mm = canvasToChartMm(
+          pendingCalibration.imgX,
+          pendingCalibration.imgY
+        );
+        if (!mm) return undefined;
+        const guess = canvasToValue(mm.chartX, mm.chartY, config);
+        return {
+          day: Math.max(0, Math.min(7, Math.round(guess.day))),
+          hour: Math.round(guess.hour),
+          value:
+            Math.round(guess.value / config.minorGrid) * config.minorGrid,
+        };
+      })()
+    : undefined;
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-muted/30 rounded-2xl">
@@ -171,11 +251,27 @@ export function OverlayCanvas({
         </div>
       )}
 
-      {/* Zoom badge */}
-      <div className="absolute top-3 right-3 z-20 glass rounded-lg px-2 py-1">
-        <span className="text-[10px] font-mono font-medium text-muted-foreground">
-          {Math.round(zoom * 100)}%
-        </span>
+      {/* Affine status badge */}
+      <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
+        {mode === "digitize" && (
+          <div
+            className={`glass rounded-lg px-2 py-1 text-[10px] font-mono font-medium ${
+              affineMatrix ? "text-emerald-500" : "text-amber-500"
+            }`}
+            title={
+              affineMatrix
+                ? "Affine warp aktivan"
+                : "Bez kalibracije — koordinate približne"
+            }
+          >
+            {affineMatrix ? "● kalibrirano" : "○ bez kalibracije"}
+          </div>
+        )}
+        <div className="glass rounded-lg px-2 py-1">
+          <span className="text-[10px] font-mono font-medium text-muted-foreground">
+            {Math.round(zoom * 100)}%
+          </span>
+        </div>
       </div>
 
       <div
@@ -197,7 +293,7 @@ export function OverlayCanvas({
             height: baseH,
           }}
         >
-          {/* IMAGE LAYER — always fully visible */}
+          {/* IMAGE LAYER */}
           {imgSize.w > 0 && (
             <img
               src={imageUrl}
@@ -216,7 +312,7 @@ export function OverlayCanvas({
             />
           )}
 
-          {/* SVG TEMPLATE LAYER — opacity is adjustable */}
+          {/* SVG TEMPLATE LAYER */}
           <div
             style={{
               position: "absolute",
@@ -244,11 +340,10 @@ export function OverlayCanvas({
                   onCalibrationPointRemove(p.id);
                 }}
               >
-                {/* Outer ring */}
                 <div className="w-[14px] h-[14px] rounded-full border-2 border-orange-400 bg-orange-400/20 cursor-pointer group-hover:bg-orange-400/50 transition-colors animate-pulse-glow" />
-                {/* Label */}
-                <span className="absolute -top-4 left-1/2 -translate-x-1/2 text-[9px] font-mono font-bold text-orange-400 bg-background/80 px-1 rounded">
-                  {i + 1}
+                <span className="absolute -top-4 left-1/2 -translate-x-1/2 text-[9px] font-mono font-bold text-orange-400 bg-background/80 px-1 rounded whitespace-nowrap">
+                  {i + 1} · {p.meta.value}
+                  {config.unit.replace(/\s.*/, "")}
                 </span>
               </div>
             ))}
@@ -274,7 +369,6 @@ export function OverlayCanvas({
                       : "border-primary bg-primary/40"
                   }`}
                 />
-                {/* Hover tooltip */}
                 {hoveredPoint === p.id && (
                   <div className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap glass rounded-md px-2 py-0.5 text-[9px] font-mono text-foreground shadow-lg pointer-events-none">
                     {p.value.toFixed(1)} {config.unit}
@@ -284,6 +378,17 @@ export function OverlayCanvas({
             ))}
         </div>
       </div>
+
+      {/* Calibration dialog */}
+      <CalibrationDialog
+        open={pendingCalibration !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingCalibration(null);
+        }}
+        config={config}
+        onConfirm={handleConfirmCalibration}
+        initial={dialogInitial}
+      />
     </div>
   );
 }

@@ -31,14 +31,20 @@ export interface ChartConfig {
 
 export interface CalibrationPoint {
   id: string;
-  /** X position on the image (pixels) */
+  /** X position on the displayed image (canvas pixels at base scale) */
   imgX: number;
-  /** Y position on the image (pixels) */
+  /** Y position on the displayed image (canvas pixels at base scale) */
   imgY: number;
   /** X position on the chart template (mm) */
   chartX: number;
   /** Y position on the chart template (mm) */
   chartY: number;
+  /** Original (day, hour, value) the user entered to define this point */
+  meta: {
+    day: number;
+    hour: number;
+    value: number;
+  };
 }
 
 export interface DataPoint {
@@ -47,7 +53,7 @@ export interface DataPoint {
   canvasX: number;
   /** Y on overlay canvas (pixels) */
   canvasY: number;
-  /** Day of week (0=Monday, 6=Sunday) */
+  /** Day of week (0=Monday, 7=next Monday) */
   day: number;
   /** Hour (0-24, decimal) */
   hour: number;

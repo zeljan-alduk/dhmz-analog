@@ -76,58 +76,52 @@ export function getDayLabels() {
 }
 
 /**
- * Calculate the arc sag (horizontal displacement) at a given position
- * along the measurement axis, caused by the pen arm geometry.
+ * Pen-arm arc sag (horizontal displacement) at a given measurement-axis position.
  *
- * For a pen arm of length R with pivot at distance P from chart start:
- * At measurement position x (0 = chart start):
- *   sag = R - sqrt(R² - (x - P)²) - (R - sqrt(R² - P²))
+ * Arm of length R, pivot at distance P from chart start. At measurement
+ * position x, the pen sits at horizontal offset:
+ *     sag(x) = (R − √(R² − (x−P)²)) − (R − √(R² − P²))
+ * relative to a vertical reference line through the pivot height.
  *
- * This gives the horizontal offset (in time-axis direction) relative to
- * the straight line at the pivot height.
+ * Returns 0 at x = P (the pivot height) and grows with |x − P|.
  */
-export function arcSag(
-  measurementPos: number,
-  config: ChartConfig
-): number {
+export function arcSag(measurementPos: number, config: ChartConfig): number {
   const R = config.penArmRadius;
   const P = config.penArmPivot;
   const sagAtPivot = R - Math.sqrt(R * R - P * P);
-  const sagAtPos = R - Math.sqrt(R * R - (measurementPos - P) * (measurementPos - P));
+  const dx = measurementPos - P;
+  const sagAtPos = R - Math.sqrt(R * R - dx * dx);
   return sagAtPos - sagAtPivot;
 }
 
 /**
  * For barograph (landscape): time arcs are vertical curves.
- * Given a time position (x in mm) and measurement position (y from chart base),
- * returns the actual x position accounting for arc curvature.
+ * Forward: true time x → displayed x at given measurement y.
  */
 export function barographArcX(
   timeX: number,
   measurementY: number,
   config: ChartConfig
 ): number {
-  const sag = arcSag(measurementY, config);
-  return timeX - sag;
+  return timeX - arcSag(measurementY, config);
 }
 
 /**
  * For drum charts (portrait): time arcs are horizontal curves.
- * Given a time position (y in mm) and measurement position (x from chart left),
- * returns the actual y position accounting for arc curvature.
+ * Forward: true time y → displayed y at given measurement x.
  */
 export function drumArcY(
   timeY: number,
   measurementX: number,
   config: ChartConfig
 ): number {
-  const sag = arcSag(measurementX, config);
-  return timeY - sag;
+  return timeY - arcSag(measurementX, config);
 }
 
 /**
- * Convert a canvas pixel position to chart coordinates (day, hour, value).
- * canvasX, canvasY are in the chart coordinate system (mm).
+ * Convert a chart-mm coordinate (post-affine) to (day, hour, value).
+ * Applies inverse arc-sag so that the pen-arm curvature is removed before
+ * decoding the time axis.
  */
 export function canvasToValue(
   chartX: number,
@@ -135,29 +129,73 @@ export function canvasToValue(
   config: ChartConfig
 ): { day: number; hour: number; value: number } {
   if (config.orientation === "landscape") {
-    // Barograph: X = time, Y = measurement (inverted: top = high pressure)
-    const dayWidth = config.chartWidth / config.days;
-    const totalDay = chartX / dayWidth;
-    const day = Math.floor(totalDay);
-    const hourFraction = (totalDay - day) * 24;
-
-    // Y axis: top of chart = maxValue, bottom = minValue
+    // Barograph: X = time, Y = measurement (top = high pressure)
     const valueRange = config.maxValue - config.minValue;
     const value = config.maxValue - (chartY / config.chartHeight) * valueRange;
 
-    return { day: Math.min(day, 7), hour: hourFraction, value };
-  } else {
-    // Drum charts: Y = time (top to bottom), X = measurement
-    const dayHeight = config.chartHeight / config.days;
-    const totalDay = chartY / dayHeight;
+    // Inverse arc-sag: undo the horizontal shift caused by the pen arm
+    // at this measurement height.
+    const trueTimeX = chartX + arcSag(chartY, config);
+
+    const dayWidth = config.chartWidth / config.days;
+    const totalDay = trueTimeX / dayWidth;
     const day = Math.floor(totalDay);
     const hourFraction = (totalDay - day) * 24;
 
-    // X axis: left = minValue, right = maxValue
+    return {
+      day: Math.max(0, Math.min(day, 7)),
+      hour: hourFraction,
+      value,
+    };
+  } else {
+    // Drum chart: Y = time (top→bottom), X = measurement (left→right)
     const valueRange = config.maxValue - config.minValue;
     const value = config.minValue + (chartX / config.chartWidth) * valueRange;
 
-    return { day: Math.min(day, 7), hour: hourFraction, value };
+    const trueTimeY = chartY + arcSag(chartX, config);
+
+    const dayHeight = config.chartHeight / config.days;
+    const totalDay = trueTimeY / dayHeight;
+    const day = Math.floor(totalDay);
+    const hourFraction = (totalDay - day) * 24;
+
+    return {
+      day: Math.max(0, Math.min(day, 7)),
+      hour: hourFraction,
+      value,
+    };
+  }
+}
+
+/**
+ * Inverse of canvasToValue: given a (day, hour, value), return the
+ * displayed chart-mm coordinate (with arc-sag applied).
+ *
+ * Useful for placing reference markers on the template, and for
+ * computing chart-mm from user-entered calibration metadata.
+ */
+export function valueToChart(
+  day: number,
+  hour: number,
+  value: number,
+  config: ChartConfig
+): { chartX: number; chartY: number } {
+  const valueRange = config.maxValue - config.minValue;
+
+  if (config.orientation === "landscape") {
+    const dayWidth = config.chartWidth / config.days;
+    const trueTimeX = (day + hour / 24) * dayWidth;
+    const chartY =
+      ((config.maxValue - value) / valueRange) * config.chartHeight;
+    // Apply forward arc-sag at this measurement height
+    const chartX = trueTimeX - arcSag(chartY, config);
+    return { chartX, chartY };
+  } else {
+    const dayHeight = config.chartHeight / config.days;
+    const trueTimeY = (day + hour / 24) * dayHeight;
+    const chartX = ((value - config.minValue) / valueRange) * config.chartWidth;
+    const chartY = trueTimeY - arcSag(chartX, config);
+    return { chartX, chartY };
   }
 }
 
@@ -169,8 +207,14 @@ export function formatHour(hour: number): string {
 
 export function getDayName(dayIndex: number): string {
   const names = [
-    "Ponedjeljak", "Utorak", "Srijeda", "Četvrtak",
-    "Petak", "Subota", "Nedjelja", "Ponedjeljak",
+    "Ponedjeljak",
+    "Utorak",
+    "Srijeda",
+    "Četvrtak",
+    "Petak",
+    "Subota",
+    "Nedjelja",
+    "Ponedjeljak",
   ];
-  return names[Math.min(dayIndex, 7)];
+  return names[Math.max(0, Math.min(dayIndex, 7))];
 }

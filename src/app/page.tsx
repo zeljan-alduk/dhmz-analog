@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import {
   ChartType,
   CalibrationPoint,
@@ -8,6 +8,11 @@ import {
   WorkflowStep,
 } from "@/lib/types";
 import { CHART_CONFIGS } from "@/lib/chart-geometry";
+import { computeAffineTransform } from "@/lib/transform";
+import {
+  runAutoCalibration,
+  type AutoCalibrationResult,
+} from "@/lib/auto-calibration";
 import { ChartSVG } from "@/components/chart-template/ChartSVG";
 import { ImageUpload } from "@/components/image-upload/ImageUpload";
 import { OverlayCanvas } from "@/components/overlay-canvas/OverlayCanvas";
@@ -27,6 +32,8 @@ import {
   Monitor,
   Layers,
   Eye,
+  Sparkles,
+  AlertTriangle,
 } from "lucide-react";
 
 const CHART_OPTIONS: {
@@ -106,6 +113,53 @@ export default function Home() {
 
   const config = chartType ? CHART_CONFIGS[chartType] : null;
 
+  // Compute the affine transform whenever calibration points change.
+  // Needs ≥3 non-collinear correspondences. Returns null otherwise.
+  const affine = useMemo(() => {
+    if (calibrationPoints.length < 3) return null;
+    return computeAffineTransform(calibrationPoints);
+  }, [calibrationPoints]);
+  const affineMatrix = affine?.matrix ?? null;
+
+  // ─── Auto-calibration state ───────────────────────────────────────
+  const [autoCalState, setAutoCalState] = useState<
+    | { kind: "idle" }
+    | { kind: "running" }
+    | { kind: "success"; result: AutoCalibrationResult }
+    | { kind: "fail"; message: string }
+  >({ kind: "idle" });
+
+  const handleAutoCalibrate = useCallback(async () => {
+    if (!imageUrl || !config) return;
+    setAutoCalState({ kind: "running" });
+    try {
+      // Display dimensions used by OverlayCanvas — must match its computation.
+      const isLandscape = config.orientation === "landscape";
+      const baseW = isLandscape ? config.chartWidth + 36 : config.paperWidth + 19;
+      const baseH = isLandscape
+        ? config.chartHeight + 22
+        : config.paperHeight + 24;
+
+      const result = await runAutoCalibration(imageUrl, config, baseW, baseH);
+      if (!result) {
+        setAutoCalState({
+          kind: "fail",
+          message:
+            "Nije moguće pouzdano detektirati rešetku — kalibrirajte ručno.",
+        });
+        return;
+      }
+      // Replace existing calibration points with the four detected corners.
+      setCalibrationPoints(result.points);
+      setAutoCalState({ kind: "success", result });
+    } catch (err) {
+      setAutoCalState({
+        kind: "fail",
+        message: err instanceof Error ? err.message : "Auto-kalibracija nije uspjela.",
+      });
+    }
+  }, [imageUrl, config]);
+
   const handleChartSelect = (type: ChartType) => {
     setChartType(type);
     setStep("upload");
@@ -146,6 +200,7 @@ export default function Home() {
     setImageUrl(null);
     setCalibrationPoints([]);
     setDataPoints([]);
+    setAutoCalState({ kind: "idle" });
   };
 
   const stepIndex = STEPS.findIndex((s) => s.key === step);
@@ -384,6 +439,19 @@ export default function Home() {
               </div>
 
               <div className="flex items-center gap-4">
+                {/* Auto-detect button */}
+                <button
+                  onClick={handleAutoCalibrate}
+                  disabled={autoCalState.kind === "running"}
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gradient-to-r from-violet-500/15 to-fuchsia-500/15 border border-violet-500/30 text-xs font-semibold text-violet-600 dark:text-violet-400 hover:from-violet-500/25 hover:to-fuchsia-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Automatska detekcija rešetke"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  {autoCalState.kind === "running"
+                    ? "Detektiranje..."
+                    : "Auto-detect"}
+                </button>
+
                 {/* SVG opacity control */}
                 <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-2">
                   <Eye className="w-3.5 h-3.5 text-muted-foreground" />
@@ -431,6 +499,40 @@ export default function Home() {
               </span>
             </p>
 
+            {/* Auto-calibration status banner */}
+            {autoCalState.kind === "success" && (
+              <div className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-700 dark:text-emerald-400 animate-fade-in">
+                <Sparkles className="w-3.5 h-3.5 flex-shrink-0" />
+                <span className="flex-1">
+                  Detektirano:{" "}
+                  <span className="font-mono font-semibold">
+                    {autoCalState.result.diagnostics.detectedCols}×
+                    {autoCalState.result.diagnostics.detectedRows}
+                  </span>{" "}
+                  linija (očekivano{" "}
+                  <span className="font-mono">
+                    {autoCalState.result.diagnostics.expectedCols}×
+                    {autoCalState.result.diagnostics.expectedRows}
+                  </span>
+                  ), RMS{" "}
+                  <span className="font-mono">
+                    {autoCalState.result.diagnostics.colsRms.toFixed(2)}/
+                    {autoCalState.result.diagnostics.rowsRms.toFixed(2)} px
+                  </span>
+                  , povjerenje{" "}
+                  <span className="font-mono font-semibold">
+                    {(autoCalState.result.confidence * 100).toFixed(0)}%
+                  </span>
+                </span>
+              </div>
+            )}
+            {autoCalState.kind === "fail" && (
+              <div className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-700 dark:text-amber-400 animate-fade-in">
+                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+                <span>{autoCalState.message}</span>
+              </div>
+            )}
+
             <div
               className="bg-card border border-border/60 rounded-2xl overflow-hidden shadow-lg"
               style={{ height: "calc(100vh - 200px)" }}
@@ -446,6 +548,7 @@ export default function Home() {
                 onDataPointAdd={handleDataPointAdd}
                 onDataPointRemove={handleDataPointRemove}
                 svgOpacity={svgOpacity}
+                affineMatrix={affineMatrix}
               />
             </div>
           </div>
@@ -508,6 +611,7 @@ export default function Home() {
                     onDataPointAdd={handleDataPointAdd}
                     onDataPointRemove={handleDataPointRemove}
                     svgOpacity={svgOpacity}
+                    affineMatrix={affineMatrix}
                   />
                 </div>
               </div>
