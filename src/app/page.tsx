@@ -191,12 +191,26 @@ export default function Home() {
       setCalibrationPoints(result.points);
       setAutoCalState({ kind: "success", result });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      // Stale blob URL — happens when the user is mid-drag on the angle
+      // slider and a queued auto-cal points at a URL we already replaced.
+      // Don't surface as an error; the next config/image change will retry.
+      if (msg.includes("Failed to load image")) {
+        setAutoCalState({ kind: "idle" });
+        return;
+      }
       setAutoCalState({
         kind: "fail",
         message: err instanceof Error ? err.message : "Auto-kalibracija nije uspjela.",
       });
     }
   }, [imageUrl, config, detectionConfig]);
+
+  // Track every blob URL we create so handleReset can revoke them all at
+  // once. Avoids the race where a queued async consumer (auto-cal, mask
+  // compute) is still loading a URL that was just revoked.
+  const rotatedUrlsRef = useRef<string[]>([]);
+  const maskUrlsRef = useRef<string[]>([]);
 
   // ─── Rotation: recompute imageUrl from originalImageUrl + rotationAngle ──
   // The rotation angle includes both coarse (90° buttons) and fine (slider)
@@ -242,12 +256,12 @@ export default function Home() {
         );
         if (cancelled || !blob) return;
         const newUrl = URL.createObjectURL(blob);
-        setImageUrl((prev) => {
-          if (prev && prev !== originalImageUrl && prev !== newUrl) {
-            URL.revokeObjectURL(prev);
-          }
-          return newUrl;
-        });
+        // Track the new URL for cleanup on Reset; do NOT revoke prev here —
+        // queued auto-cal/mask compute callbacks may still be reading it, and
+        // revoking would surface as "Failed to load image" while the user is
+        // dragging the angle slider.
+        rotatedUrlsRef.current.push(newUrl);
+        setImageUrl(newUrl);
         // New rotation invalidates calibration corners
         setCalibrationPoints([]);
       } catch (e) {
@@ -273,9 +287,10 @@ export default function Home() {
   }, []);
 
   // ─── Mask overlay: recompute whenever the image or detection config change ──
+  // Don't revoke previous URLs eagerly — queued auto-cal/mask consumers may
+  // still be reading them. Track instead and revoke on Reset.
   useEffect(() => {
     if (!imageUrl || step !== "calibrate") {
-      if (maskUrl && maskUrl.startsWith("blob:")) URL.revokeObjectURL(maskUrl);
       setMaskUrl(null);
       return;
     }
@@ -283,16 +298,16 @@ export default function Home() {
     const t = setTimeout(() => {
       computeGridMaskUrl(imageUrl, detectionConfig)
         .then((url) => {
-          if (cancelled) {
-            URL.revokeObjectURL(url);
-            return;
-          }
-          setMaskUrl((prev) => {
-            if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
-            return url;
-          });
+          if (cancelled) return;
+          maskUrlsRef.current.push(url);
+          setMaskUrl(url);
         })
-        .catch((e) => console.error("mask compute failed", e));
+        .catch((e) => {
+          // Stale URL revoked while we were loading — common during fast
+          // slider drags, ignore silently.
+          if (typeof e?.message === "string" && e.message.includes("Failed to load image")) return;
+          console.error("mask compute failed", e);
+        });
     }, 80);
     return () => {
       cancelled = true;
@@ -301,14 +316,23 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageUrl, JSON.stringify(detectionConfig), step]);
 
+
   // ─── Auto-redetect on detection-config changes (debounced) ───────────────
   // Only fires AFTER the user has run auto-detect at least once — until then,
   // sliders just update the live mask preview.
+  // Use a ref so the queued timer always calls the LATEST handleAutoCalibrate
+  // (which closes over the latest imageUrl/config). Otherwise the timer fires
+  // a stale callback referencing a blob URL that has since been replaced.
+  const handleAutoCalRef = useRef(handleAutoCalibrate);
+  useEffect(() => {
+    handleAutoCalRef.current = handleAutoCalibrate;
+  }, [handleAutoCalibrate]);
+
   useEffect(() => {
     if (!hasRunAutoCalRef.current) return;
     if (!imageUrl || !config || step !== "calibrate") return;
     const t = setTimeout(() => {
-      handleAutoCalibrate();
+      handleAutoCalRef.current();
     }, 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -351,15 +375,14 @@ export default function Home() {
   const handleReset = () => {
     setStep("select");
     setChartType(null);
-    if (imageUrl && imageUrl.startsWith("blob:")) URL.revokeObjectURL(imageUrl);
-    if (
-      originalImageUrl &&
-      originalImageUrl !== imageUrl &&
-      originalImageUrl.startsWith("blob:")
-    ) {
+    // Revoke all blob URLs we created during the session.
+    if (originalImageUrl && originalImageUrl.startsWith("blob:")) {
       URL.revokeObjectURL(originalImageUrl);
     }
-    if (maskUrl && maskUrl.startsWith("blob:")) URL.revokeObjectURL(maskUrl);
+    for (const u of rotatedUrlsRef.current) URL.revokeObjectURL(u);
+    for (const u of maskUrlsRef.current) URL.revokeObjectURL(u);
+    rotatedUrlsRef.current = [];
+    maskUrlsRef.current = [];
     setImageUrl(null);
     setOriginalImageUrl(null);
     setRotationAngle(0);
@@ -367,6 +390,7 @@ export default function Home() {
     setCalibrationPoints([]);
     setDataPoints([]);
     setAutoCalState({ kind: "idle" });
+    hasRunAutoCalRef.current = false;
   };
 
   const stepIndex = STEPS.findIndex((s) => s.key === step);
