@@ -38,7 +38,11 @@ const DEFAULTS: DetectionConfig = {
   minValue: 0.15,
   maxValue: 0.92,
   smoothRadius: 2,
-  peakProminence: 1.4,
+  // Densely-gridded charts (e.g. Lambrecht thermograph with 1°C minor lines)
+  // raise the global rowSums/colSums mean enough that internal day separators
+  // smooth to ~1.2× the mean. Use a low-ish prominence factor so they pass.
+  // The lattice fitter rejects bogus runs, so being permissive here is safe.
+  peakProminence: 1.15,
   minPeakSeparation: 4,
 };
 
@@ -462,21 +466,27 @@ function buildGridMask(img: ImageData, cfg: DetectionConfig): Uint8Array {
     const v = max;
     const s = max === 0 ? 0 : (max - min) / max;
 
-    if (s < cfg.minSaturation || v < cfg.minValue || v > cfg.maxValue) continue;
-
-    // Hue gate: keep green/teal grid lines, reject blue/red pen ink.
-    // Lambrecht charts ship in either green (G dominant) or red (R dominant)
-    // grid; we currently optimize for green. Pen traces are typically blue or
-    // black — black falls out via the saturation gate above; blue lands here
-    // (B dominant) and would otherwise survive into the projection sums and
-    // create spurious lattice peaks where the trace concentrates vertically.
+    // Two acceptance branches:
     //
-    // Rule: green channel must be at least ~75% of the dominant channel. For
-    // pure-green and teal grids this is trivially true. For blue ink (B≫G) it
-    // fails. For red ink (R≫G) it also fails.
-    if (g < max * 0.75) continue;
+    // 1) Saturated green/teal grid lines. Hue gate (g ≥ 75% of max) keeps
+    //    green and teal but rejects blue/red ink, which otherwise pollutes the
+    //    projection sums where pen traces concentrate.
+    //
+    // 2) Dark, low-saturation lines (black/dark-grey ink). Some Lambrecht
+    //    charts use black for the day separators while keeping value lines
+    //    green; without this branch the rowSums get only chart-edge borders
+    //    and fitLattice runs out of peaks. Threshold deliberately tight on
+    //    value (must be quite dark) and saturation (must be near-grey) so
+    //    that mid-tone blue pen ink stays out — typical pen blue has v≈0.5+
+    //    and s≈0.6+.
+    const greenGrid =
+      s >= cfg.minSaturation &&
+      v >= cfg.minValue &&
+      v <= cfg.maxValue &&
+      g >= max * 0.75;
+    const darkLine = v < 0.4 && s < 0.35;
 
-    mask[i] = 1;
+    if (greenGrid || darkLine) mask[i] = 1;
   }
   return mask;
 }
