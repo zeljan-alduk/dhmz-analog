@@ -131,11 +131,31 @@ export function autoCalibrate(
   // count-agnostic — the hint is only used by the caller for validation).
   const colsFit = fitLattice(colPeaks, valueLineCount);
   const rowsFit = fitLattice(rowPeaks, timeLineCount);
-  if (!colsFit || !rowsFit) return null;
+  if (!colsFit || !rowsFit) {
+    console.warn("[auto-cal] fitLattice null", {
+      w, h,
+      colPeaks: colPeaks.length,
+      rowPeaks: rowPeaks.length,
+      colsFit, rowsFit,
+    });
+    return null;
+  }
 
   const colsRmsRel = colsFit.rms / Math.max(1, colsFit.spacing);
   const rowsRmsRel = rowsFit.rms / Math.max(1, rowsFit.spacing);
-  if (colsRmsRel > 0.20 || rowsRmsRel > 0.20) return null;
+  // RMS threshold: 35% of lattice spacing. Real charts have majors + minors at
+  // mixed strengths, so the per-peak position has some bias — but the
+  // OUTERMOST peaks (which become our calibration corners) are still the chart
+  // edges regardless of internal non-uniformity. Tight enough to reject bogus
+  // fits, loose enough to accept noisy real-world Plustek 320e scans.
+  if (colsRmsRel > 0.35 || rowsRmsRel > 0.35) {
+    console.warn("[auto-cal] RMS too high", {
+      colsRmsRel: colsRmsRel.toFixed(3),
+      rowsRmsRel: rowsRmsRel.toFixed(3),
+      colsFit, rowsFit,
+    });
+    return null;
+  }
 
   // Step 6: figure out which axis is which.
   // Real-world Plustek 320e scans land in either:
@@ -167,7 +187,15 @@ export function autoCalibrate(
     const imageIsLandscape = w >= h;
     axes = imageIsLandscape ? "cols=time,rows=value" : "cols=value,rows=time";
   }
-  if (!axes) return null;
+  if (!axes) {
+    console.warn("[auto-cal] no axes assignment matched count check", {
+      colsLikelyTime, colsLikelyValue, rowsLikelyTime, rowsLikelyValue,
+      timeLineCount, valueLineCount,
+      colsFitCount: colsFit.count, rowsFitCount: rowsFit.count,
+      orientation: config.orientation,
+    });
+    return null;
+  }
 
   const isRotated =
     (config.orientation === "landscape" && axes === "cols=value,rows=time") ||
@@ -434,9 +462,21 @@ function buildGridMask(img: ImageData, cfg: DetectionConfig): Uint8Array {
     const v = max;
     const s = max === 0 ? 0 : (max - min) / max;
 
-    if (s >= cfg.minSaturation && v >= cfg.minValue && v <= cfg.maxValue) {
-      mask[i] = 1;
-    }
+    if (s < cfg.minSaturation || v < cfg.minValue || v > cfg.maxValue) continue;
+
+    // Hue gate: keep green/teal grid lines, reject blue/red pen ink.
+    // Lambrecht charts ship in either green (G dominant) or red (R dominant)
+    // grid; we currently optimize for green. Pen traces are typically blue or
+    // black — black falls out via the saturation gate above; blue lands here
+    // (B dominant) and would otherwise survive into the projection sums and
+    // create spurious lattice peaks where the trace concentrates vertically.
+    //
+    // Rule: green channel must be at least ~75% of the dominant channel. For
+    // pure-green and teal grids this is trivially true. For blue ink (B≫G) it
+    // fails. For red ink (R≫G) it also fails.
+    if (g < max * 0.75) continue;
+
+    mask[i] = 1;
   }
   return mask;
 }
