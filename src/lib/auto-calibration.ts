@@ -64,11 +64,22 @@ export interface AutoCalibrationDiagnostics {
 }
 
 export interface AutoCalibrationResult {
-  /** Four corner calibration points, in DISPLAY coordinates. */
+  /** Four corner calibration points, in DISPLAY coordinates (post-rotation if any). */
   points: CalibrationPoint[];
   diagnostics: AutoCalibrationDiagnostics;
   /** Confidence 0-1 (1 = perfect lattice match) */
   confidence: number;
+  /**
+   * True if the input image was 90°-rotated relative to the chart geometry —
+   * see `rotatedImageUrl` for the corrected blob URL the caller should swap in.
+   */
+  rotated: boolean;
+  /**
+   * If non-null, a blob URL of the input image rotated to match the chart
+   * geometry. The points above are already in this rotated image's
+   * coordinate space — the caller should swap `imageUrl` to this value.
+   */
+  rotatedImageUrl: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -116,43 +127,64 @@ export function autoCalibrate(
     Math.round((config.maxValue - config.minValue) / config.majorGrid) + 1;
   const timeLineCount = config.days + 1;
 
-  const expectedCols =
-    config.orientation === "landscape" ? timeLineCount : valueLineCount;
-  const expectedRows =
-    config.orientation === "landscape" ? valueLineCount : timeLineCount;
-
-  // Step 5: lattice fits
-  const colsFit = fitLattice(colPeaks, expectedCols);
-  const rowsFit = fitLattice(rowPeaks, expectedRows);
-
+  // Step 5: single lattice fit per axis (passes a hint count, but the fit is
+  // count-agnostic — the hint is only used by the caller for validation).
+  const colsFit = fitLattice(colPeaks, valueLineCount);
+  const rowsFit = fitLattice(rowPeaks, timeLineCount);
   if (!colsFit || !rowsFit) return null;
 
-  // Validate: RMS must be small relative to lattice spacing.
-  // We deliberately do NOT enforce a strict count match because Lambrecht charts
-  // have minor grid lines between majors (e.g. every 5 hPa between 10 hPa lines).
-  // The detector legitimately picks these up and fits a finer lattice; the outermost
-  // detected positions are still the chart edges, so corners are correct.
   const colsRmsRel = colsFit.rms / Math.max(1, colsFit.spacing);
   const rowsRmsRel = rowsFit.rms / Math.max(1, rowsFit.spacing);
   if (colsRmsRel > 0.20 || rowsRmsRel > 0.20) return null;
 
-  // Sanity: must have detected at least the expected number of lines (counting
-  // minors brings count up, never down). If we have FEWER than expected, the
-  // detection is missing some line family.
-  if (colsFit.count < expectedCols - 1 || rowsFit.count < expectedRows - 1) {
-    return null;
-  }
+  // Step 6: figure out which axis is which.
+  // Real-world Plustek 320e scans land in either:
+  //   (a) "natural" orientation — chart geometry orientation matches image aspect
+  //   (b) "rotated 90°" — long edge of chart paper aligned with long edge of
+  //       portrait scanner platen, so cols/rows roles swap.
+  // Decide by which count assignment satisfies the lower-bound check (charts have
+  // minor grids between majors, so we accept ≥ expected-1 in either direction).
+  // Lambrecht charts: barograph has 8 days × 12 pressure majors, hygro/thermo
+  // similar. For the typical case where time-line and value-line counts differ
+  // (8 vs 12), this disambiguates cleanly.
+  const colsLikelyTime = colsFit.count >= timeLineCount - 1;
+  const colsLikelyValue = colsFit.count >= valueLineCount - 1;
+  const rowsLikelyTime = rowsFit.count >= timeLineCount - 1;
+  const rowsLikelyValue = rowsFit.count >= valueLineCount - 1;
 
-  // Step 6: corners in pixel space
+  // For landscape chart: "natural" = cols=time, rows=value
+  // For portrait chart:  "natural" = cols=value, rows=time
+  type Axes = "cols=time,rows=value" | "cols=value,rows=time";
+  let axes: Axes | null = null;
+  if (rowsLikelyValue && colsLikelyTime) axes = "cols=time,rows=value";
+  else if (rowsLikelyTime && colsLikelyValue) axes = "cols=value,rows=time";
+  // If both fit (e.g. days≈valueLines), prefer the one matching chart orientation
+  // by aspect ratio.
+  if (
+    (rowsLikelyValue && colsLikelyTime) &&
+    (rowsLikelyTime && colsLikelyValue)
+  ) {
+    const imageIsLandscape = w >= h;
+    axes = imageIsLandscape ? "cols=time,rows=value" : "cols=value,rows=time";
+  }
+  if (!axes) return null;
+
+  const isRotated =
+    (config.orientation === "landscape" && axes === "cols=value,rows=time") ||
+    (config.orientation === "portrait" && axes === "cols=time,rows=value");
+
+  // Step 7: corners in pixel space
   const x0 = colsFit.origin;
   const x1 = colsFit.origin + (colsFit.count - 1) * colsFit.spacing;
   const y0 = rowsFit.origin;
   const y1 = rowsFit.origin + (rowsFit.count - 1) * rowsFit.spacing;
 
-  // Map corners to (day, hour, value)
-  // ASSUMPTION on axis polarity (must match the SVG template):
-  //   landscape: y0=top=maxValue, y1=bottom=minValue, x0=left=day0, x1=right=day(days)
-  //   portrait:  x0=left=minValue, x1=right=maxValue, y0=top=day0, y1=bottom=day(days)
+  // Map corners to (day, hour, value).
+  // For the "natural" cases the polarity matches the SVG template directly. For
+  // the "rotated 90°" cases we assume the user rotated the chart 90° CW to fit
+  // the platen — i.e. the chart's left edge ended up at the TOP of the scan.
+  // This is the most common scanning habit; if the user rotated the other way,
+  // they can fix labels manually after auto-detect.
   type CornerSpec = {
     imgX: number;
     imgY: number;
@@ -161,21 +193,44 @@ export function autoCalibrate(
     value: number;
   };
   let corners: CornerSpec[];
-  if (config.orientation === "landscape") {
+  if (config.orientation === "landscape" && !isRotated) {
+    // x = time, y = value (max top, min bottom)
     corners = [
       { imgX: x0, imgY: y0, day: 0, hour: 0, value: config.maxValue },
       { imgX: x1, imgY: y0, day: config.days, hour: 0, value: config.maxValue },
       { imgX: x0, imgY: y1, day: 0, hour: 0, value: config.minValue },
       { imgX: x1, imgY: y1, day: config.days, hour: 0, value: config.minValue },
     ];
-  } else {
+  } else if (config.orientation === "landscape" && isRotated) {
+    // 90° CW: y = time (top=day0, bottom=day_max),
+    //         x = value (left=max → top of chart was at left, right=min)
+    corners = [
+      { imgX: x0, imgY: y0, day: 0, hour: 0, value: config.maxValue },
+      { imgX: x1, imgY: y0, day: 0, hour: 0, value: config.minValue },
+      { imgX: x0, imgY: y1, day: config.days, hour: 0, value: config.maxValue },
+      { imgX: x1, imgY: y1, day: config.days, hour: 0, value: config.minValue },
+    ];
+  } else if (config.orientation === "portrait" && !isRotated) {
+    // x = value (min left, max right), y = time (top=day0, bottom=day_max)
     corners = [
       { imgX: x0, imgY: y0, day: 0, hour: 0, value: config.minValue },
       { imgX: x1, imgY: y0, day: 0, hour: 0, value: config.maxValue },
       { imgX: x0, imgY: y1, day: config.days, hour: 0, value: config.minValue },
       { imgX: x1, imgY: y1, day: config.days, hour: 0, value: config.maxValue },
     ];
+  } else {
+    // portrait + rotated 90° CW: x = time, y = value
+    corners = [
+      { imgX: x0, imgY: y0, day: 0, hour: 0, value: config.minValue },
+      { imgX: x1, imgY: y0, day: config.days, hour: 0, value: config.minValue },
+      { imgX: x0, imgY: y1, day: 0, hour: 0, value: config.maxValue },
+      { imgX: x1, imgY: y1, day: config.days, hour: 0, value: config.maxValue },
+    ];
   }
+
+  // Effective expected counts for diagnostics — match the chosen axes assignment.
+  const expectedCols = axes === "cols=time,rows=value" ? timeLineCount : valueLineCount;
+  const expectedRows = axes === "cols=time,rows=value" ? valueLineCount : timeLineCount;
 
   const ts = Date.now();
   const points: CalibrationPoint[] = corners.map((c, i) => {
@@ -199,6 +254,8 @@ export function autoCalibrate(
   return {
     points,
     confidence,
+    rotated: isRotated,
+    rotatedImageUrl: null,
     diagnostics: {
       detectedCols: colPeaks.length,
       detectedRows: rowPeaks.length,
@@ -222,6 +279,15 @@ export function autoCalibrate(
  * image space to the (displayWidth × displayHeight) space used by the
  * OverlayCanvas. Caller must pass the same display dimensions used by the
  * canvas (baseW × baseH).
+ *
+ * Auto-rotation: if the first detection pass reports `rotated: true` (chart
+ * geometry's long-axis perpendicular to image's long-axis — typical when a
+ * landscape barograph is scanned on a portrait Plustek 320e platen), this
+ * function rebuilds the source image rotated 90° CW, re-runs detection on the
+ * corrected image, and returns its blob URL via `rotatedImageUrl`. The caller
+ * should swap `imageUrl` to this value so subsequent calibration / digitize
+ * clicks operate on the corrected orientation. Falls back to 90° CCW if CW
+ * doesn't yield a "natural" orientation.
  */
 export async function runAutoCalibration(
   imageUrl: string,
@@ -230,12 +296,50 @@ export async function runAutoCalibration(
   displayHeight: number,
   detection: Partial<DetectionConfig> = {}
 ): Promise<AutoCalibrationResult | null> {
-  const img = await loadImage(imageUrl);
+  const original = await loadImage(imageUrl);
 
-  // Detection works on a downscaled copy (faster, plenty of resolution for grid).
-  // Cap the long edge at 1200px.
+  // First pass: detect on original image.
+  const first = detectOnHTMLImage(original, config, detection);
+
+  if (first && !first.rotated) {
+    return rescalePoints(first, displayWidth, displayHeight);
+  }
+
+  // Either failed entirely OR succeeded but flagged a 90° rotation. Try CW.
+  const cwUrl = await rotateImageToBlobUrl(original, 90);
+  const cwImg = await loadImage(cwUrl);
+  const cwResult = detectOnHTMLImage(cwImg, config, detection);
+  if (cwResult && !cwResult.rotated) {
+    cwResult.rotatedImageUrl = cwUrl;
+    return rescalePoints(cwResult, displayWidth, displayHeight);
+  }
+  // CW didn't help — release blob and try CCW.
+  URL.revokeObjectURL(cwUrl);
+
+  const ccwUrl = await rotateImageToBlobUrl(original, -90);
+  const ccwImg = await loadImage(ccwUrl);
+  const ccwResult = detectOnHTMLImage(ccwImg, config, detection);
+  if (ccwResult && !ccwResult.rotated) {
+    ccwResult.rotatedImageUrl = ccwUrl;
+    return rescalePoints(ccwResult, displayWidth, displayHeight);
+  }
+  URL.revokeObjectURL(ccwUrl);
+
+  // No orientation worked; surface the first attempt's result if any.
+  return first ? rescalePoints(first, displayWidth, displayHeight) : null;
+}
+
+/** Run autoCalibrate on an HTMLImageElement (handles downscale + ImageData). */
+function detectOnHTMLImage(
+  img: HTMLImageElement,
+  config: ChartConfig,
+  detection: Partial<DetectionConfig>
+): AutoCalibrationResult | null {
   const maxEdge = 1200;
-  const scale = Math.min(1, maxEdge / Math.max(img.naturalWidth, img.naturalHeight));
+  const scale = Math.min(
+    1,
+    maxEdge / Math.max(img.naturalWidth, img.naturalHeight)
+  );
   const dw = Math.round(img.naturalWidth * scale);
   const dh = Math.round(img.naturalHeight * scale);
 
@@ -246,22 +350,59 @@ export async function runAutoCalibration(
   if (!ctx) return null;
   ctx.drawImage(img, 0, 0, dw, dh);
   const imgData = ctx.getImageData(0, 0, dw, dh);
+  return autoCalibrate(imgData, config, detection);
+}
 
-  const result = autoCalibrate(imgData, config, detection);
-  if (!result) return null;
-
-  // Rescale points from natural-image-space (downscaled) → display-space.
-  // The OverlayCanvas stretches the image to displayWidth × displayHeight via
-  // objectFit:fill, so the mapping is just a per-axis linear scale.
-  const sx = displayWidth / dw;
-  const sy = displayHeight / dh;
+/** Rescale point coordinates from downscaled-natural to display-space. */
+function rescalePoints(
+  result: AutoCalibrationResult,
+  displayWidth: number,
+  displayHeight: number
+): AutoCalibrationResult {
+  const sx = displayWidth / result.diagnostics.imageWidth;
+  const sy = displayHeight / result.diagnostics.imageHeight;
   result.points = result.points.map((p) => ({
     ...p,
     imgX: p.imgX * sx,
     imgY: p.imgY * sy,
   }));
-
   return result;
+}
+
+/**
+ * Rotate an HTMLImageElement by ±90° and return a blob URL of the result.
+ * Caller is responsible for revoking the URL when no longer needed.
+ */
+async function rotateImageToBlobUrl(
+  img: HTMLImageElement,
+  degrees: 90 | -90
+): Promise<string> {
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = h;
+  canvas.height = w;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not allocate canvas context for rotation");
+  if (degrees === 90) {
+    // 90° CW: translate to (h, 0) then rotate 90°.
+    ctx.translate(h, 0);
+    ctx.rotate(Math.PI / 2);
+  } else {
+    // 90° CCW: translate to (0, w) then rotate -90°.
+    ctx.translate(0, w);
+    ctx.rotate(-Math.PI / 2);
+  }
+  ctx.drawImage(img, 0, 0);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Canvas toBlob returned null"));
+        return;
+      }
+      resolve(URL.createObjectURL(blob));
+    }, "image/png");
+  });
 }
 
 function loadImage(url: string): Promise<HTMLImageElement> {

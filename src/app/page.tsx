@@ -149,6 +149,18 @@ export default function Home() {
         });
         return;
       }
+      // If detection rotated the image to match chart geometry, swap the
+      // display source so subsequent clicks see the corrected orientation.
+      // `result.points` are already in the rotated image's coordinate space.
+      if (result.rotatedImageUrl) {
+        const previousUrl = imageUrl;
+        setImageUrl(result.rotatedImageUrl);
+        // Release the previous blob URL — only safe because we just took a
+        // snapshot above and React re-renders before the GC matters.
+        if (previousUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(previousUrl);
+        }
+      }
       // Replace existing calibration points with the four detected corners.
       setCalibrationPoints(result.points);
       setAutoCalState({ kind: "success", result });
