@@ -34,6 +34,8 @@ import {
   Eye,
   Sparkles,
   AlertTriangle,
+  RotateCw,
+  FlipVertical,
 } from "lucide-react";
 
 const CHART_OPTIONS: {
@@ -168,6 +170,52 @@ export default function Home() {
       });
     }
   }, [imageUrl, config]);
+
+  const handleRotateImage = useCallback(
+    async (degrees: 90 | -90 | 180) => {
+      if (!imageUrl) return;
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const i = new Image();
+        i.crossOrigin = "anonymous";
+        i.onload = () => resolve(i);
+        i.onerror = () => reject(new Error("load failed"));
+        i.src = imageUrl;
+      });
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+      const canvas = document.createElement("canvas");
+      const isQuarter = degrees === 90 || degrees === -90;
+      canvas.width = isQuarter ? h : w;
+      canvas.height = isQuarter ? w : h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      if (degrees === 90) {
+        ctx.translate(h, 0);
+        ctx.rotate(Math.PI / 2);
+      } else if (degrees === -90) {
+        ctx.translate(0, w);
+        ctx.rotate(-Math.PI / 2);
+      } else {
+        // 180°
+        ctx.translate(w, h);
+        ctx.rotate(Math.PI);
+      }
+      ctx.drawImage(img, 0, 0);
+      const blob: Blob | null = await new Promise((r) =>
+        canvas.toBlob(r, "image/png")
+      );
+      if (!blob) return;
+      const newUrl = URL.createObjectURL(blob);
+      const previousUrl = imageUrl;
+      setImageUrl(newUrl);
+      // Clear calibration — corners are no longer valid in the rotated image's
+      // coordinate system.
+      setCalibrationPoints([]);
+      setAutoCalState({ kind: "idle" });
+      if (previousUrl.startsWith("blob:")) URL.revokeObjectURL(previousUrl);
+    },
+    [imageUrl]
+  );
 
   const handleChartSelect = (type: ChartType) => {
     setChartType(type);
@@ -448,6 +496,37 @@ export default function Home() {
               </div>
 
               <div className="flex items-center gap-4">
+                {/* Rotate scan: clears calibration so user can re-run auto-detect */}
+                <div className="flex items-center gap-1 bg-card border border-border/60 rounded-xl px-2 py-1">
+                  <button
+                    onClick={() => handleRotateImage(-90)}
+                    disabled={autoCalState.kind === "running"}
+                    className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
+                    title="Zarotiraj 90° ulijevo"
+                    type="button"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => handleRotateImage(180)}
+                    disabled={autoCalState.kind === "running"}
+                    className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
+                    title="Zarotiraj 180° (naopako)"
+                    type="button"
+                  >
+                    <FlipVertical className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => handleRotateImage(90)}
+                    disabled={autoCalState.kind === "running"}
+                    className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
+                    title="Zarotiraj 90° udesno"
+                    type="button"
+                  >
+                    <RotateCw className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
                 {/* Auto-detect button */}
                 <button
                   onClick={handleAutoCalibrate}
