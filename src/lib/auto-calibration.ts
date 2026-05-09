@@ -18,25 +18,42 @@
 import { CalibrationPoint, ChartConfig } from "./types";
 import { valueToChart } from "./chart-geometry";
 
-interface DetectionConfig {
+export interface DetectionConfig {
   /** Min saturation (0-1) to count a pixel as "colored grid" */
   minSaturation: number;
   /** Min value (0-1) to skip near-black noise */
   minValue: number;
   /** Max value (0-1) to skip near-white background */
   maxValue: number;
+  /**
+   * Green-dominance gate: green channel must be ≥ greenDominance × max channel.
+   * 0.75 keeps green/teal grid, rejects blue/red ink.
+   */
+  greenDominance: number;
+  /** Dark-line branch: pixel is treated as "dark grid ink" if v < darkLineMaxV ... */
+  darkLineMaxV: number;
+  /** ... AND s < darkLineMaxS (low saturation, near black/grey). */
+  darkLineMaxS: number;
   /** Half-window for box-smoothing the 1D projections */
   smoothRadius: number;
   /** A peak must reach `peakProminence × global mean` of the projection */
   peakProminence: number;
   /** Pixels closer than this are merged */
   minPeakSeparation: number;
+  /**
+   * Max acceptable relative RMS (rms / lattice spacing) per axis. Above this,
+   * the fit is considered too noisy and detection is rejected.
+   */
+  maxRelativeRms: number;
 }
 
-const DEFAULTS: DetectionConfig = {
+export const DETECTION_DEFAULTS: DetectionConfig = {
   minSaturation: 0.10,
   minValue: 0.15,
   maxValue: 0.92,
+  greenDominance: 0.75,
+  darkLineMaxV: 0.4,
+  darkLineMaxS: 0.35,
   smoothRadius: 2,
   // Densely-gridded charts (e.g. Lambrecht thermograph with 1°C minor lines)
   // raise the global rowSums/colSums mean enough that internal day separators
@@ -44,7 +61,11 @@ const DEFAULTS: DetectionConfig = {
   // The lattice fitter rejects bogus runs, so being permissive here is safe.
   peakProminence: 1.15,
   minPeakSeparation: 4,
+  maxRelativeRms: 0.35,
 };
+
+/** Backwards-compat alias for code that reads DEFAULTS */
+const DEFAULTS = DETECTION_DEFAULTS;
 
 interface LatticeFit {
   origin: number;
@@ -147,12 +168,11 @@ export function autoCalibrate(
 
   const colsRmsRel = colsFit.rms / Math.max(1, colsFit.spacing);
   const rowsRmsRel = rowsFit.rms / Math.max(1, rowsFit.spacing);
-  // RMS threshold: 35% of lattice spacing. Real charts have majors + minors at
-  // mixed strengths, so the per-peak position has some bias — but the
-  // OUTERMOST peaks (which become our calibration corners) are still the chart
-  // edges regardless of internal non-uniformity. Tight enough to reject bogus
-  // fits, loose enough to accept noisy real-world Plustek 320e scans.
-  if (colsRmsRel > 0.35 || rowsRmsRel > 0.35) {
+  // RMS threshold: configurable max relative RMS (rms / lattice spacing). Real
+  // charts have majors + minors at mixed strengths, so the per-peak position
+  // has some bias — but the OUTERMOST peaks (which become our calibration
+  // corners) are still the chart edges regardless of internal non-uniformity.
+  if (colsRmsRel > cfg.maxRelativeRms || rowsRmsRel > cfg.maxRelativeRms) {
     console.warn("[auto-cal] RMS too high", {
       colsRmsRel: colsRmsRel.toFixed(3),
       rowsRmsRel: rowsRmsRel.toFixed(3),
@@ -483,8 +503,8 @@ function buildGridMask(img: ImageData, cfg: DetectionConfig): Uint8Array {
       s >= cfg.minSaturation &&
       v >= cfg.minValue &&
       v <= cfg.maxValue &&
-      g >= max * 0.75;
-    const darkLine = v < 0.4 && s < 0.35;
+      g >= max * cfg.greenDominance;
+    const darkLine = v < cfg.darkLineMaxV && s < cfg.darkLineMaxS;
 
     if (greenGrid || darkLine) mask[i] = 1;
   }

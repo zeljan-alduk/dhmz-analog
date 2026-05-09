@@ -12,6 +12,8 @@ import { computeAffineTransform } from "@/lib/transform";
 import {
   runAutoCalibration,
   type AutoCalibrationResult,
+  type DetectionConfig,
+  DETECTION_DEFAULTS,
 } from "@/lib/auto-calibration";
 import { ChartSVG } from "@/components/chart-template/ChartSVG";
 import { ImageUpload } from "@/components/image-upload/ImageUpload";
@@ -36,6 +38,8 @@ import {
   AlertTriangle,
   RotateCw,
   FlipVertical,
+  Settings2,
+  ChevronDown,
 } from "lucide-react";
 
 const CHART_OPTIONS: {
@@ -131,6 +135,12 @@ export default function Home() {
     | { kind: "fail"; message: string }
   >({ kind: "idle" });
 
+  // ─── Detection config (live-tunable thresholds) ───────────────────
+  const [detectionConfig, setDetectionConfig] = useState<DetectionConfig>(
+    DETECTION_DEFAULTS
+  );
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
   const handleAutoCalibrate = useCallback(async () => {
     if (!imageUrl || !config) return;
     setAutoCalState({ kind: "running" });
@@ -139,7 +149,13 @@ export default function Home() {
       // is the single source of truth for the (DISPLAY_SCALE × mm) sizing.
       const { w: baseW, h: baseH } = getDisplaySize(config);
 
-      const result = await runAutoCalibration(imageUrl, config, baseW, baseH);
+      const result = await runAutoCalibration(
+        imageUrl,
+        config,
+        baseW,
+        baseH,
+        detectionConfig
+      );
       if (!result) {
         setAutoCalState({
           kind: "fail",
@@ -169,7 +185,7 @@ export default function Home() {
         message: err instanceof Error ? err.message : "Auto-kalibracija nije uspjela.",
       });
     }
-  }, [imageUrl, config]);
+  }, [imageUrl, config, detectionConfig]);
 
   const handleRotateImage = useCallback(
     async (degrees: 90 | -90 | 180) => {
@@ -620,6 +636,81 @@ export default function Home() {
                 <span>{autoCalState.message}</span>
               </div>
             )}
+
+            {/* Advanced detection settings (collapsible) */}
+            <div className="mb-3">
+              <button
+                onClick={() => setSettingsOpen((v) => !v)}
+                className="flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+                type="button"
+              >
+                <Settings2 className="w-3.5 h-3.5" />
+                Napredne postavke detekcije
+                <ChevronDown
+                  className={`w-3.5 h-3.5 transition-transform ${
+                    settingsOpen ? "rotate-180" : ""
+                  }`}
+                />
+              </button>
+              {settingsOpen && (
+                <div className="mt-2 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 p-4 rounded-xl bg-card border border-border/60 animate-fade-in">
+                  {(
+                    [
+                      ["minSaturation", "Min saturacija (zelena)", 0, 0.5, 0.01],
+                      ["minValue", "Min svjetlina", 0, 0.5, 0.01],
+                      ["maxValue", "Maks svjetlina", 0.5, 1, 0.01],
+                      [
+                        "greenDominance",
+                        "Zelena dominacija (G/max)",
+                        0.5,
+                        1,
+                        0.01,
+                      ],
+                      ["darkLineMaxV", "Tamne linije: maks v", 0, 0.6, 0.01],
+                      ["darkLineMaxS", "Tamne linije: maks s", 0, 0.6, 0.01],
+                      ["smoothRadius", "Zaglađivanje", 0, 5, 1],
+                      ["peakProminence", "Prominencija vrha", 1, 2, 0.05],
+                      ["minPeakSeparation", "Min razmak (px)", 1, 20, 1],
+                      ["maxRelativeRms", "Maks rel. RMS", 0.05, 0.6, 0.01],
+                    ] as const
+                  ).map(([key, label, min, max, step]) => (
+                    <div key={key} className="space-y-1">
+                      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                        <span>{label}</span>
+                        <span className="font-mono font-medium text-foreground">
+                          {Number.isInteger(step)
+                            ? detectionConfig[key].toFixed(0)
+                            : detectionConfig[key].toFixed(2)}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={min}
+                        max={max}
+                        step={step}
+                        value={detectionConfig[key]}
+                        onChange={(e) =>
+                          setDetectionConfig((c) => ({
+                            ...c,
+                            [key]: parseFloat(e.target.value),
+                          }))
+                        }
+                        className="w-full slider-emerald"
+                      />
+                    </div>
+                  ))}
+                  <div className="md:col-span-2 lg:col-span-4 flex justify-end pt-1">
+                    <button
+                      onClick={() => setDetectionConfig(DETECTION_DEFAULTS)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+                      type="button"
+                    >
+                      Vrati zadane vrijednosti
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
 
             <div
               className="bg-card border border-border/60 rounded-2xl overflow-hidden shadow-lg"
