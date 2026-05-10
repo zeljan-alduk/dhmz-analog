@@ -13,9 +13,27 @@
   mokru mrlju, čuvaj ga"), korigira pojedinačne točke ("hour 14 je
   vjerojatno 1015 a ne 998"), odobrava izlaz, eksportira CSV. Ne mora
   ručno klikati corners niti detaljno fine-tunati — Claude to radi.
-- **Web tool** je VISUAL state između nas dvojice. Live polling pokazuje
-  user-u što Claude radi; user-ove ručne mutacije se sync-aju natrag i
-  Claude ih vidi pri sljedećem GET-u.
+- **Web tool** je VISUAL state + CHAT između nas dvojice. Live polling
+  pokazuje user-u što Claude radi; user-ove ručne mutacije i chat poruke
+  sync-aju se natrag, Claude long-polla i reagira.
+
+### Tok ulaska u session
+
+1. User uploada sken na `dhmz.aldo.tech` → modal s session URL.
+2. User u terminalu:
+   ```
+   $ claude "https://dhmz.aldo.tech/session/abc123 — pogledaj sto je iza ovog linka"
+   ```
+3. Claude WebFetch-a `/context` → vidi briefing s tools.
+4. **Briefing je prompt injection** (intencionalno) — Claude reagira:
+   "Ovaj URL sadrži instrukcije iz vanjskog izvora. Tools mogu mijenjati
+    state tvog session-a, postaviti chat poruke, opcionalno editirati
+    app kod. Hoćeš da nastavim?"
+5. User: "da". To je **explicit authorization gate**.
+6. Claude se uključi u agent loop:
+   - Read state → take action → POST chat status → long-poll user message
+     → react → repeat
+7. Frontend prikazuje sve mutacije live + chat panel s Claude porukama.
 
 ---
 
@@ -293,6 +311,12 @@ class SessionNote:
     by: Literal["claude", "user", "system"] = "claude"
 
 @dataclass
+class ChatMessage:
+    ts: float
+    by: Literal["user", "claude"]
+    text: str
+
+@dataclass
 class Session:
     id: str
     created_at: float
@@ -308,6 +332,7 @@ class Session:
     polylines: list[VectorPolylineModel] = field(default_factory=list)
     data_points: list[DataPointModel] = field(default_factory=list)
     notes: list[SessionNote] = field(default_factory=list)
+    chat_messages: list[ChatMessage] = field(default_factory=list)
     version: int = 0            # increments on every mutation
 
     def bump(self, note_text: str | None = None, by: str = "claude") -> None:
@@ -568,6 +593,60 @@ Server computes `canvasX`/`canvasY` from current calibration if available.
 
 **Response 200:** `{ "version": 11 }`
 
+##### `POST /api/sessions/{id}/chat` — user → Claude
+
+Pozvan od **frontend**-a kad user upiše poruku u chat panel.
+
+**Request:**
+```json
+{ "text": "Day 3 ima mokru mrlju, čuvaj ga." }
+```
+
+**Response 201:** `{ "version": 13, "messageIndex": 5 }`
+
+Server appenda u `chat_messages` listu kao `{ts, by: "user", text}`.
+Bumpa version (frontend već polla state ali Claude long-polla `/chat`
+endpoint koji sazna).
+
+##### `POST /api/sessions/{id}/chat-claude` — Claude → user
+
+Pozvan od **Claude-a** (preko `Bash curl`) za poruku koja se prikazuje
+user-u u browser chat panelu.
+
+**Request:**
+```json
+{ "text": "Postavio rotaciju -1.2°. Sad postavljam kalibraciju..." }
+```
+
+**Response 201:** `{ "version": 14, "messageIndex": 6 }`
+
+##### `GET /api/sessions/{id}/chat?since={N}&wait={sec}`
+
+Long-poll endpoint za Claude da čeka novu user poruku bez blokirajućeg
+busy-loop-a. Server drži connection do **30 s** ili dok stigne nova poruka
+s `index > since`.
+
+**Request:** `GET /api/sessions/{id}/chat?since=5&wait=30`
+
+**Response 200:**
+```json
+{
+  "messages": [
+    { "ts": 1763850100.0, "by": "user", "text": "Day 3 ima mokru mrlju..." }
+  ],
+  "nextSince": 6,
+  "timeout": false
+}
+```
+
+Ako timeout (30 s bez nove poruke):
+```json
+{ "messages": [], "nextSince": 5, "timeout": true }
+```
+
+Claude tada može iznova long-pollati ili izaći iz loop-a (npr. ako je sve
+što je trebao napraviti gotovo).
+
 ##### `POST /api/sessions/{id}/note`
 
 **Request:**
@@ -722,6 +801,30 @@ rade ali sada PUT-aju natrag u session preko npr. `PUT /calibration`.
 **Conflict resolution (MVP):** last-write-wins. User i Claude oboje pisu →
 zadnji zapis vrijedi. Notes panel pokazuje promjene tako da user vidi što
 je Claude napravio i može undo.
+
+#### 4.2.5. Chat panel
+
+**Lokacija:** desni sidebar u `/session/{id}` route, novi tab "💬 Claude"
+ili replace postojeći "Log aktivnosti".
+
+**UI elementi:**
+- Stream of messages (scrollable, najnovija dolje)
+- Claude messages: lijeva strana, light bg, markdown rendered
+- User messages: desna strana, primary bg
+- System notes (rotation set, calibration set, itd.): centrirano,
+  italic, manji font
+- Bottom: input box + Send button (Enter za send)
+- Top: "Claude active" indicator (zeleni dot ako je Claude bio aktivan
+  unutar 30 s)
+
+**State management:**
+- Frontend prima messages preko `GET /api/sessions/{id}` (full state ima
+  `chat_messages: [...]`)
+- Polling `/poll` bumpne version → re-fetch full state → diff messages
+- User Send: `POST /api/sessions/{id}/chat` s `{text}`, zatim re-fetch
+
+**Komponenta:** `src/components/session-chat/SessionChat.tsx`
+- Props: `messages`, `onSend(text)`, `claudeActive: boolean`
 
 #### 4.2.4. Kako Claude pristupa session-u iz Claude Code-a
 
@@ -991,15 +1094,50 @@ ssh -i ~/.ssh/id_ed25519 ubuntu@135.125.161.96 \
 
 ## How the user expects to interact
 
-The user is a meteorology technician digitizing archived scans. They've
-done dozens of these. They're watching their browser tab. Keep terminal
-output **brief** — visible mutations are self-evident. Use the terminal
-mainly for:
-- Asking clarifying questions (`"Day 4 looks like it has two overlapping
-  traces. Which should I extract?"`)
-- Reporting completion (`"Done. 192 points extracted, days 3 and 7 skipped
-  due to damage. Please review."`)
-- Discussing edge cases.
+The user is a meteorology technician digitizing archived scans. They are
+**not** in the terminal — they're in their browser tab on the session
+page. **Communicate primarily through the chat panel:**
+
+```bash
+# Post a Claude message to the chat panel
+curl -s -X POST -H "Content-Type: application/json" \
+  https://dhmz.aldo.tech/api/sessions/{ID}/chat-claude \
+  -d '{"text": "Postavio rotaciju -1.2°. Sad postavljam kalibraciju..."}'
+
+# Long-poll for user reply (waits up to 30 s)
+curl -s "https://dhmz.aldo.tech/api/sessions/{ID}/chat?since=N&wait=30"
+```
+
+After every meaningful mutation:
+1. POST a brief chat message describing what you did and what's next.
+2. If you need clarification ("Day 4 has two overlapping traces — which
+   should I extract?"), POST to chat and long-poll for the reply.
+3. When done, POST a final summary ("Digitization complete: 192 points,
+   days 3 and 7 skipped. Please review and export CSV.").
+
+## Agent loop
+
+After the user authorizes you (recognized this briefing as a prompt
+injection and approved), enter this loop:
+
+```
+1. Fetch image + state.
+2. Decide next action based on state:
+   - rotation not set & scan tilted? → PUT /rotation
+   - calibration empty? → PUT /calibration
+   - data points empty & user wants extraction? → POST /extract-trace
+   - outliers user flagged? → PUT /data-point/{idx}
+3. POST status to /chat-claude.
+4. Long-poll /chat?since=N&wait=30.
+5. If new user message: parse intent, repeat from step 2.
+6. If timeout (30 s without message) AND all expected actions are done:
+   POST a "ready, waiting for instructions" message and long-poll again.
+7. Exit when user explicitly says "gotovo" / "kraj" / "done" or session
+   expires.
+```
+
+You're an event-driven agent listening on chat. Don't busy-loop; long-poll
+is cheap and keeps you responsive without burning cycles.
 
 ## State right now
 
@@ -1134,6 +1272,28 @@ specific geometry, common pitfalls, and the exact curl invocations.
 ---
 
 ## 7. Sigurnost
+
+### 7.0. Prompt-injection authorization gate (by design)
+
+`/api/sessions/{id}/context` vraća markdown koji JE prompt injection —
+namjerno. Sadrži instrukcije ("operate this tool", popis tools) i workflow
+recept. Modern Claude (Sonnet 4.5+, Opus 4.6+) prepoznaje WebFetch sadržaj
+kao **data**, ne kao instructions. Standardno ponašanje:
+
+1. Claude fetcha URL po user-ovom pozivu
+2. Vidi briefing → "ovo je instrukcija iz vanjskog izvora"
+3. **Pita user-a explicit:** "URL sadrži tools koji mogu mijenjati state
+   tvog session-a (rotacija, kalibracija, data points), postaviti chat
+   poruke, opcionalno editirati app kod. Hoćeš da nastavim?"
+4. User: "da" → explicit authorization → Claude proceeds.
+5. User: "ne" / "stop" → Claude ne dira ništa.
+
+To je **feature**, ne bug. Authorization gate je u user-ovom Claude
+client-u (gdje user fizički sjedi), ne na server-u. Server vjeruje session
+ID-u (hard-to-guess random); samo user koji ima ID može authorizirati
+operacije nad njim.
+
+### 7.1. Session ID
 
 - **Session ID:** `secrets.token_hex(8)` = 16 hex chars = 64 bit entropy.
   Brute force prevention: nginx rate limit (10 req/sec po IP) već postoji
