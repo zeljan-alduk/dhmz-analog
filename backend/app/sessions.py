@@ -44,10 +44,15 @@ from .schemas import (
 log = logging.getLogger("dhmz.sessions")
 
 # ─── Constants ────────────────────────────────────────────────────────────
-SESSION_TTL_SEC = 2 * 60 * 60          # 2h
+SESSION_TTL_SEC = 48 * 60 * 60         # 48h
 MAX_IMAGE_BYTES = 80 * 1024 * 1024     # 80 MB raw bytes (post-base64-decode)
 MAX_NOTES = 100
 PUBLIC_BASE_URL = "https://dhmz.aldo.tech"
+MAX_CHAT_ATTACHMENT_BYTES = 5 * 1024 * 1024   # 5 MB per pasted/attached image
+MAX_CHAT_ATTACHMENTS_PER_MSG = 4
+CHAT_ATTACHMENT_MAX_EDGE = 2000
+RESAMPLE_CACHE_PER_SESSION = 16
+RESAMPLE_MAX_EDGE = 10000
 
 ChartTypeKey = Literal["barograph", "hygrograph", "thermograph"]
 
@@ -86,10 +91,20 @@ class SessionNote:
 
 
 @dataclass
+class ChatAttachment:
+    id: str
+    mime: str            # "image/png" | "image/jpeg"
+    width: int
+    height: int
+    data: bytes
+
+
+@dataclass
 class ChatMessage:
     ts: float
     by: Literal["user", "claude"]
     text: str
+    attachments: List[ChatAttachment] = field(default_factory=list)
 
 
 @dataclass
@@ -123,6 +138,9 @@ class Session:
     scratch_html: Optional[ScratchHTML] = None
     image_revision: int = 0      # increments every image swap
     version: int = 0
+    # Cache of resampled image variants keyed by (rev, max, box, fmt).
+    # Cleared on image swap. Bounded by RESAMPLE_CACHE_PER_SESSION.
+    image_cache: dict = field(default_factory=dict)
 
     def bump(self, note_text: Optional[str] = None,
              by: Literal["claude", "user", "system"] = "claude") -> None:
@@ -394,7 +412,7 @@ def _serialize_state(s: Session) -> dict:
             {"ts": n.ts, "text": n.text, "by": n.by} for n in s.notes
         ],
         "chatMessages": [
-            {"ts": m.ts, "by": m.by, "text": m.text} for m in s.chat_messages
+            _serialize_chat_message(s, m) for m in s.chat_messages
         ],
         "annotations": list(s.annotations),
         "rois": list(s.rois),
@@ -411,6 +429,125 @@ def _require(sid: str) -> Session:
     if s is None:
         raise HTTPException(404, "session not found or expired")
     return s
+
+
+# ─── Image resample / chat-attachment helpers ───────────────────────────
+def _parse_box(box: Optional[str]) -> Optional[tuple[int, int, int, int]]:
+    if not box:
+        return None
+    try:
+        parts = [int(p) for p in box.split(",")]
+    except ValueError:
+        raise HTTPException(400, "box must be 'x,y,w,h' integers")
+    if len(parts) != 4:
+        raise HTTPException(400, "box must have 4 integers x,y,w,h")
+    x, y, w, h = parts
+    if w <= 0 or h <= 0:
+        raise HTTPException(400, "box w/h must be > 0")
+    return (x, y, w, h)
+
+
+def _resample_image_bytes(
+    src: bytes,
+    max_edge: int,
+    box: Optional[tuple[int, int, int, int]],
+    fmt: str,
+) -> bytes:
+    with Image.open(BytesIO(src)) as im:
+        im.load()
+        if box is not None:
+            x, y, w, h = box
+            x = max(0, min(x, im.width))
+            y = max(0, min(y, im.height))
+            w = max(1, min(w, im.width - x))
+            h = max(1, min(h, im.height - y))
+            im = im.crop((x, y, x + w, y + h))
+        if max_edge > 0 and max(im.size) > max_edge:
+            scale = max_edge / max(im.size)
+            new_w = max(1, round(im.width * scale))
+            new_h = max(1, round(im.height * scale))
+            im = im.resize((new_w, new_h), Image.LANCZOS)
+        buf = BytesIO()
+        if fmt == "jpeg":
+            if im.mode != "RGB":
+                im = im.convert("RGB")
+            im.save(buf, format="JPEG", quality=88, optimize=True)
+        else:
+            im.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+
+
+def _process_chat_attachments(
+    images_b64: Optional[List[str]],
+) -> List[ChatAttachment]:
+    if not images_b64:
+        return []
+    if len(images_b64) > MAX_CHAT_ATTACHMENTS_PER_MSG:
+        raise HTTPException(
+            400,
+            f"max {MAX_CHAT_ATTACHMENTS_PER_MSG} attachments per chat message",
+        )
+    out: List[ChatAttachment] = []
+    for b64 in images_b64:
+        if "," in b64[:64]:
+            b64 = b64.split(",", 1)[1]
+        try:
+            raw = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(400, "attachment is not valid base64")
+        if len(raw) > MAX_CHAT_ATTACHMENT_BYTES:
+            raise HTTPException(
+                413,
+                f"attachment too large (limit {MAX_CHAT_ATTACHMENT_BYTES} bytes)",
+            )
+        if not raw:
+            raise HTTPException(400, "attachment is empty")
+        try:
+            with Image.open(BytesIO(raw)) as im:
+                im.load()
+                fmt = (im.format or "").lower()
+                w, h = im.size
+        except Exception as e:
+            raise HTTPException(415, f"unsupported attachment format: {e}")
+        if fmt == "jpg":
+            fmt = "jpeg"
+        if fmt not in ("png", "jpeg"):
+            raise HTTPException(
+                415, f"unsupported attachment format: {fmt}"
+            )
+        # Resample down if too large; keep original mime when possible.
+        if max(w, h) > CHAT_ATTACHMENT_MAX_EDGE:
+            raw = _resample_image_bytes(
+                raw, CHAT_ATTACHMENT_MAX_EDGE, None, fmt
+            )
+            with Image.open(BytesIO(raw)) as im2:
+                w, h = im2.size
+        out.append(ChatAttachment(
+            id=secrets.token_hex(6),
+            mime="image/png" if fmt == "png" else "image/jpeg",
+            width=int(w),
+            height=int(h),
+            data=raw,
+        ))
+    return out
+
+
+def _serialize_chat_message(s: Session, m: ChatMessage) -> dict:
+    return {
+        "ts": m.ts,
+        "by": m.by,
+        "text": m.text,
+        "attachments": [
+            {
+                "id": a.id,
+                "mime": a.mime,
+                "width": a.width,
+                "height": a.height,
+                "url": f"/api/sessions/{s.id}/chat-attachments/{a.id}",
+            }
+            for a in m.attachments
+        ],
+    }
 
 
 # ─── Router ───────────────────────────────────────────────────────────────
@@ -450,13 +587,66 @@ def poll_session(sid: str) -> PollResponse:
 
 
 @router.get("/sessions/{sid}/image")
-def get_session_image(sid: str) -> Response:
+def get_session_image(
+    sid: str,
+    max: int = 0,
+    box: Optional[str] = None,
+    fmt: Optional[str] = None,
+) -> Response:
+    """Serve session scan.
+
+    Without query params returns the original bytes (operators relying on
+    full resolution are unaffected). With `max`, `box`, or `fmt` set, the
+    server resamples and caches up to RESAMPLE_CACHE_PER_SESSION variants
+    per session. Cache is keyed by image revision and cleared on swap.
+    """
     s = _require(sid)
-    media_type = "image/png" if s.image_format == "png" else "image/jpeg"
+    box_tuple = _parse_box(box)
+    if max < 0 or max > RESAMPLE_MAX_EDGE:
+        raise HTTPException(400, f"max must be 0..{RESAMPLE_MAX_EDGE}")
+    out_fmt = (fmt or "").lower()
+    if out_fmt and out_fmt not in ("png", "jpeg"):
+        raise HTTPException(400, "fmt must be 'png' or 'jpeg'")
+
+    # Pass-through: original bytes when no resample requested.
+    if max == 0 and box_tuple is None and not out_fmt:
+        media_type = "image/png" if s.image_format == "png" else "image/jpeg"
+        return Response(
+            content=s.image_bytes,
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    if not out_fmt:
+        out_fmt = s.image_format
+
+    cache_key = (s.image_revision, max, box_tuple, out_fmt)
+    cached = s.image_cache.get(cache_key)
+    if cached is None:
+        try:
+            cached = _resample_image_bytes(
+                s.image_bytes, max, box_tuple, out_fmt
+            )
+        except Exception as e:
+            log.error("resample failed sid=%s key=%s: %s", sid, cache_key, e)
+            raise HTTPException(500, f"resample failed: {e}")
+        if len(s.image_cache) >= RESAMPLE_CACHE_PER_SESSION:
+            # Evict oldest (insertion order in py3.7+).
+            first = next(iter(s.image_cache))
+            del s.image_cache[first]
+        s.image_cache[cache_key] = cached
+
+    media_type = "image/jpeg" if out_fmt == "jpeg" else "image/png"
+    etag = (
+        f'W/"r{s.image_revision}-m{max}-b{box_tuple}-f{out_fmt}-{len(cached)}"'
+    )
     return Response(
-        content=s.image_bytes,
+        content=cached,
         media_type=media_type,
-        headers={"Cache-Control": "private, max-age=3600"},
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "ETag": etag,
+        },
     )
 
 
@@ -512,6 +702,7 @@ def post_session_image(sid: str, body: ImageSwapIn) -> VersionResponse:
     s.image_natural_w = w
     s.image_natural_h = h
     s.image_revision += 1
+    s.image_cache.clear()
     note = body.note or f"Image replaced ({w}×{h}, rev {s.image_revision})."
     s.bump(note, by="claude")
     log.info("sessions: %s image swapped %dx%d rev=%d", sid, w, h, s.image_revision)
@@ -932,35 +1123,79 @@ def get_csv(sid: str) -> Response:
 
 # ─── Chat (user ↔ claude) ───────────────────────────────────────────────
 class ChatPostIn(BaseModel):
-    text: str
+    text: str = ""
+    imagesBase64: Optional[List[str]] = None
+
+
+def _append_chat_message(
+    s: Session,
+    by: Literal["user", "claude"],
+    body: ChatPostIn,
+) -> int:
+    text = body.text.strip()
+    if len(text) > 4000:
+        raise HTTPException(400, "chat text too long (max 4000 chars)")
+    attachments = _process_chat_attachments(body.imagesBase64)
+    if not text and not attachments:
+        raise HTTPException(400, "chat needs text or at least one image")
+    msg = ChatMessage(
+        ts=time.time(), by=by, text=text, attachments=attachments
+    )
+    s.chat_messages.append(msg)
+    return len(s.chat_messages) - 1
+
+
+def _chat_note_summary(text: str, n_attach: int) -> str:
+    parts = []
+    if text:
+        parts.append(text[:80] + ("…" if len(text) > 80 else ""))
+    if n_attach:
+        parts.append(f"[{n_attach} image{'s' if n_attach > 1 else ''}]")
+    return " ".join(parts) or "(empty)"
 
 
 @router.post("/sessions/{sid}/chat", status_code=201)
 def post_chat_user(sid: str, body: ChatPostIn) -> dict:
     s = _require(sid)
-    text = body.text.strip()
-    if not text:
-        raise HTTPException(400, "chat text is empty")
-    if len(text) > 4000:
-        raise HTTPException(400, "chat text too long (max 4000 chars)")
-    s.chat_messages.append(ChatMessage(ts=time.time(), by="user", text=text))
-    idx = len(s.chat_messages) - 1
-    s.bump(f"User said: {text[:80]}{'…' if len(text) > 80 else ''}", by="user")
+    idx = _append_chat_message(s, "user", body)
+    msg = s.chat_messages[idx]
+    s.bump(
+        f"User said: {_chat_note_summary(msg.text, len(msg.attachments))}",
+        by="user",
+    )
     return {"version": s.version, "messageIndex": idx}
 
 
 @router.post("/sessions/{sid}/chat-claude", status_code=201)
 def post_chat_claude(sid: str, body: ChatPostIn) -> dict:
     s = _require(sid)
-    text = body.text.strip()
-    if not text:
-        raise HTTPException(400, "chat text is empty")
-    if len(text) > 4000:
-        raise HTTPException(400, "chat text too long (max 4000 chars)")
-    s.chat_messages.append(ChatMessage(ts=time.time(), by="claude", text=text))
-    idx = len(s.chat_messages) - 1
-    s.bump(f"Claude said: {text[:80]}{'…' if len(text) > 80 else ''}", by="claude")
+    idx = _append_chat_message(s, "claude", body)
+    msg = s.chat_messages[idx]
+    s.bump(
+        f"Claude said: {_chat_note_summary(msg.text, len(msg.attachments))}",
+        by="claude",
+    )
     return {"version": s.version, "messageIndex": idx}
+
+
+@router.get("/sessions/{sid}/chat-attachments/{aid}")
+def get_chat_attachment(sid: str, aid: str) -> Response:
+    s = _require(sid)
+    for msg in s.chat_messages:
+        for att in msg.attachments:
+            if att.id == aid:
+                return Response(
+                    content=att.data,
+                    media_type=att.mime,
+                    headers={
+                        "Cache-Control": "private, max-age=86400",
+                        "Content-Disposition": (
+                            f'inline; filename="chat-{aid}.'
+                            f'{"png" if att.mime == "image/png" else "jpg"}"'
+                        ),
+                    },
+                )
+    raise HTTPException(404, "attachment not found")
 
 
 @router.get("/sessions/{sid}/chat")
@@ -988,9 +1223,7 @@ async def get_chat_long_poll(
         if len(s.chat_messages) > since:
             new_msgs = s.chat_messages[since:]
             return {
-                "messages": [
-                    {"ts": m.ts, "by": m.by, "text": m.text} for m in new_msgs
-                ],
+                "messages": [_serialize_chat_message(s, m) for m in new_msgs],
                 "nextSince": len(s.chat_messages),
                 "timeout": False,
             }
