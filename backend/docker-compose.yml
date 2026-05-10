@@ -11,6 +11,10 @@ services:
       # by /api/extract-trace as the default template when the request
       # doesn't include one.
       - ./templates:/app/templates:ro
+      # ONNX trace-segmenter model — loaded at module import. If the file is
+      # missing the backend falls back to the legacy HSV trace mask, so this
+      # mount is optional in principle but expected in production.
+      - ./models:/app/models:ro
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
     networks:
       - edge

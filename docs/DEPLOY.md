@@ -112,9 +112,17 @@ ssh -i ~/.ssh/id_ed25519 ubuntu@135.125.161.96 \
    sudo docker exec transit-nginx nginx -s reload'
 ```
 
-The `client_max_body_size 50m` and `proxy_read_timeout 120s` on `/api/`
-are required — base64-encoded PNGs after 4000-px downscale can be ~12 MB
-and trace extraction takes 1-3 s.
+The `client_max_body_size 100m` and `proxy_read_timeout 120s` on `/api/`
+are required — frontend now sends FULL-RESOLUTION uploads to the backend
+(the 4000-px cap was removed in favour of two-tier preview/full-res). A
+9992×3956 reference scan encodes to ~78 MB base64, and a rotated full-res
+PNG can run higher still.
+
+> **If you're upgrading from a deploy with `50m`**: edit
+> `/opt/slovenia-transit/nginx/conf.d/zzz-dhmz-aldo-tech.conf`, bump to
+> `100m`, then `sudo docker exec transit-nginx nginx -t && sudo docker
+> exec transit-nginx nginx -s reload`. Without this, `/api/extract-trace`
+> and `/api/calibrate-grid` will return 413 on full-res scans.
 
 ## TLS
 

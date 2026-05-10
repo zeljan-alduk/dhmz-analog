@@ -11,10 +11,17 @@ import {
 } from "@/lib/chart-geometry";
 import { imageToChart } from "@/lib/transform";
 import { CalibrationDialog } from "@/components/calibration-dialog/CalibrationDialog";
+import type { VectorPolyline } from "@/lib/vectorize";
 
 interface OverlayCanvasProps {
   config: ChartConfig;
+  /** Always-available preview image (rotated, ≤1500 px). Used at low zoom and
+   *  as a fallback while the high-res rotation is still computing. */
   imageUrl: string;
+  /** Optional full-res rotated image. Swapped in when zoom ≥ HIGH_RES_ZOOM
+   *  threshold so the user gets actual pixel detail when calibrating sub-mm
+   *  grid intersections or examining the trace. */
+  fullResImageUrl?: string | null;
   mode: "calibrate" | "digitize";
   calibrationPoints: CalibrationPoint[];
   onCalibrationPointAdd: (point: CalibrationPoint) => void;
@@ -26,13 +33,60 @@ interface OverlayCanvasProps {
   maskUrl?: string | null;
   /** Mask overlay opacity 0–1. */
   maskOpacity?: number;
+  /** Underlying image opacity 0–1. Set to 0 for "mask only" inspection mode
+   *  so users can see exactly which pixels the detector accepted, without
+   *  the original muddying the view. Defaults to 1. */
+  imageOpacity?: number;
+  /** Optional vectorized polylines (display-px coords) tagged with grid
+   *  weight. Major lines are drawn thicker than minor. */
+  tracePolylines?: VectorPolyline[] | null;
+  /** Show a black horizontal reference line at the chart's middle Y. Used
+   *  as a visual aid for rotation alignment — user adjusts the rotation
+   *  slider until detected grid horizontals are parallel to the baseline. */
+  showBaseline?: boolean;
   /** Forward affine matrix (image-px → chart-mm). 6 numbers: [a,b,c,d,e,f]. */
   affineMatrix?: number[] | null;
+}
+
+/** Zoom level at which we swap the displayed `<img>` src from the preview
+ *  blob to the full-res blob. At 100 % the preview is sharper than the
+ *  display canvas resolution, so the swap only matters when zoomed in. */
+const HIGH_RES_ZOOM = 1.8;
+
+/**
+ * Convert a sequence of points into an SVG path string, using Catmull-Rom
+ * splines for smoothness. Each interior segment becomes a cubic Bezier whose
+ * control points are derived from the neighbours (tension 0.5 → standard
+ * Catmull-Rom). Endpoints duplicate themselves so the curve passes through
+ * the first and last points exactly.
+ */
+function catmullRomToBezierPath(points: number[][]): string {
+  if (points.length === 0) return "";
+  if (points.length === 1) {
+    const [x, y] = points[0];
+    return `M ${x} ${y}`;
+  }
+  const cmds: string[] = [`M ${points[0][0]} ${points[0][1]}`];
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i - 1] ?? points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[i + 2] ?? p2;
+    const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
+    cmds.push(
+      `C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)} ${cp2x.toFixed(2)} ${cp2y.toFixed(2)} ${p2[0].toFixed(2)} ${p2[1].toFixed(2)}`
+    );
+  }
+  return cmds.join(" ");
 }
 
 export function OverlayCanvas({
   config,
   imageUrl,
+  fullResImageUrl,
   mode,
   calibrationPoints,
   onCalibrationPointAdd,
@@ -42,6 +96,9 @@ export function OverlayCanvas({
   onDataPointRemove,
   maskUrl,
   maskOpacity = 0,
+  imageOpacity = 1,
+  tracePolylines = null,
+  showBaseline = false,
   affineMatrix,
 }: OverlayCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -278,10 +335,18 @@ export function OverlayCanvas({
             {affineMatrix ? "● kalibrirano" : "○ bez kalibracije"}
           </div>
         )}
-        <div className="glass rounded-lg px-2 py-1">
+        <div className="glass rounded-lg px-2 py-1 flex items-center gap-1.5">
           <span className="text-[10px] font-mono font-medium text-muted-foreground">
             {Math.round(zoom * 100)}%
           </span>
+          {fullResImageUrl && zoom >= HIGH_RES_ZOOM && (
+            <span
+              className="text-[9px] font-mono font-bold text-emerald-500"
+              title="Puna rezolucija aktivna"
+            >
+              HD
+            </span>
+          )}
         </div>
       </div>
 
@@ -304,22 +369,64 @@ export function OverlayCanvas({
             height: baseH,
           }}
         >
-          {/* IMAGE LAYER */}
-          {imgSize.w > 0 && (
-            <img
-              src={imageUrl}
-              alt="Scan"
+          {/* IMAGE LAYER — swap to full-res when zoomed in. We render BOTH
+              <img> elements so the preview stays in the DOM while the full-res
+              decodes (avoids a blank flash). Opacity is user-controlled
+              (`imageOpacity`) so users can dim or hide the image to inspect
+              the mask alone. */}
+          {imgSize.w > 0 && imageOpacity > 0 && (
+            <>
+              <img
+                src={imageUrl}
+                alt="Scan (preview)"
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: baseW,
+                  height: baseH,
+                  objectFit: "fill",
+                  opacity: imageOpacity,
+                  pointerEvents: "none",
+                  transition: "opacity 0.15s ease",
+                }}
+                draggable={false}
+              />
+              {fullResImageUrl && zoom >= HIGH_RES_ZOOM && (
+                <img
+                  src={fullResImageUrl}
+                  alt="Scan (full-res)"
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: baseW,
+                    height: baseH,
+                    objectFit: "fill",
+                    opacity: imageOpacity,
+                    pointerEvents: "none",
+                    imageRendering: "auto",
+                    transition: "opacity 0.15s ease",
+                  }}
+                  draggable={false}
+                />
+              )}
+            </>
+          )}
+          {/* MASK-ONLY background: when the image is hidden, paint a soft
+              neutral background so the (multiply-blended) mask is visible
+              against something other than the page colour. */}
+          {imgSize.w > 0 && imageOpacity === 0 && (
+            <div
               style={{
                 position: "absolute",
                 top: 0,
                 left: 0,
                 width: baseW,
                 height: baseH,
-                objectFit: "fill",
-                opacity: 1,
+                background: "#fafaf9",
                 pointerEvents: "none",
               }}
-              draggable={false}
             />
           )}
 
@@ -344,6 +451,96 @@ export function OverlayCanvas({
               }}
               draggable={false}
             />
+          )}
+
+          {/* HORIZONTAL BASELINE — black reference line at canvas middle Y.
+              Visual aid for rotation alignment: user rotates until detected
+              grid horizontals run parallel to this line. Drawn at constant
+              screen-px stroke width regardless of zoom. */}
+          {showBaseline && (
+            <svg
+              width={baseW}
+              height={baseH}
+              viewBox={`0 0 ${baseW} ${baseH}`}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: baseW,
+                height: baseH,
+                pointerEvents: "none",
+              }}
+            >
+              <line
+                x1={0}
+                y1={baseH / 2}
+                x2={baseW}
+                y2={baseH / 2}
+                stroke="#000"
+                strokeWidth={Math.max(0.5, 1.5 / zoom)}
+                strokeDasharray={`${8 / zoom} ${4 / zoom}`}
+                opacity={0.85}
+              />
+              {/* End markers + center tick for sub-pixel alignment guidance */}
+              {[0, baseW / 2, baseW].map((x, i) => (
+                <line
+                  key={i}
+                  x1={x}
+                  y1={baseH / 2 - 8 / zoom}
+                  x2={x}
+                  y2={baseH / 2 + 8 / zoom}
+                  stroke="#000"
+                  strokeWidth={Math.max(0.5, 1.5 / zoom)}
+                  opacity={0.85}
+                />
+              ))}
+            </svg>
+          )}
+
+          {/* VECTORIZED TRACE OVERLAY — smooth polylines computed from the
+              mask via centerline + Catmull-Rom. Drawn as crisp vector paths
+              regardless of zoom (no pixelation). Stroke is independent of
+              zoom — we apply 1/zoom in the strokeWidth so it stays visually
+              ~1.5 px wide on screen at any magnification. */}
+          {tracePolylines && tracePolylines.length > 0 && (
+            <svg
+              width={baseW}
+              height={baseH}
+              viewBox={`0 0 ${baseW} ${baseH}`}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: baseW,
+                height: baseH,
+                pointerEvents: "none",
+              }}
+            >
+              {tracePolylines.map((poly, i) => {
+                // Stroke width in SCREEN pixels: major 3, minor 2, fine 1.
+                // Divided by zoom so the visual stroke stays constant
+                // regardless of magnification (the outer container is
+                // CSS-scaled by `zoom`).
+                const screenPx =
+                  poly.weight === "major"
+                    ? 3
+                    : poly.weight === "minor"
+                      ? 2
+                      : 1;
+                return (
+                  <path
+                    key={i}
+                    d={catmullRomToBezierPath(poly.points)}
+                    fill="none"
+                    stroke="#ec4899"
+                    strokeWidth={Math.max(0.2, screenPx / zoom)}
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                    opacity={0.95}
+                  />
+                );
+              })}
+            </svg>
           )}
 
           {/* Calibration points */}

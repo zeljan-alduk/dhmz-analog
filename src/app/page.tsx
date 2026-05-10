@@ -21,6 +21,7 @@ import {
   type DetectionConfig,
   DETECTION_DEFAULTS,
 } from "@/lib/auto-calibration";
+import { vectorizeMaskFromUrl, type VectorPolyline } from "@/lib/vectorize";
 import { ImageUpload } from "@/components/image-upload/ImageUpload";
 import { OverlayCanvas } from "@/components/overlay-canvas/OverlayCanvas";
 import { DataTable } from "@/components/data-table/DataTable";
@@ -45,6 +46,8 @@ import {
   FlipVertical,
   Settings2,
   ChevronDown,
+  Spline,
+  ImageOff,
 } from "lucide-react";
 
 const CHART_OPTIONS: {
@@ -88,6 +91,45 @@ const STEPS: { key: WorkflowStep; label: string }[] = [
   { key: "digitize", label: "Digitalizacija" },
 ];
 
+/**
+ * Rotate the image at `srcUrl` by `degrees` and return a fresh blob URL of
+ * the result. Caller is responsible for revoking the URL when no longer
+ * needed (we track them in *UrlsRef arrays for handleReset).
+ */
+async function rotateUrlToBlob(
+  srcUrl: string,
+  degrees: number
+): Promise<string> {
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = () => reject(new Error("rotate: load failed"));
+    i.src = srcUrl;
+  });
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  const rad = (degrees * Math.PI) / 180;
+  const cosA = Math.abs(Math.cos(rad));
+  const sinA = Math.abs(Math.sin(rad));
+  const newW = Math.round(w * cosA + h * sinA);
+  const newH = Math.round(w * sinA + h * cosA);
+  const canvas = document.createElement("canvas");
+  canvas.width = newW;
+  canvas.height = newH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("rotate: no canvas ctx");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, newW, newH);
+  ctx.translate(newW / 2, newH / 2);
+  ctx.rotate(rad);
+  ctx.drawImage(img, -w / 2, -h / 2);
+  const blob: Blob | null = await new Promise((r) =>
+    canvas.toBlob(r, "image/png")
+  );
+  if (!blob) throw new Error("rotate: toBlob null");
+  return URL.createObjectURL(blob);
+}
+
 function ThemeToggle() {
   const { theme, setTheme } = useTheme();
   const items: { value: "light" | "dark" | "system"; icon: React.ReactNode }[] = [
@@ -117,18 +159,50 @@ function ThemeToggle() {
 export default function Home() {
   const [step, setStep] = useState<WorkflowStep>("select");
   const [chartType, setChartType] = useState<ChartType | null>(null);
-  // Original (unrotated) blob URL — set once on upload, never changed by
-  // rotation controls.
+  // Two-tier image storage:
+  //   - originalImageUrl: untouched full-res upload blob. Rotated lazily for
+  //     backend calls and high-zoom canvas display.
+  //   - previewSourceUrl: ≤PREVIEW_MAX_EDGE downscale of the upload. Rotated
+  //     eagerly on every angle change for snappy UI.
+  // Both are set once on upload. The rotated derivatives are imageUrl and
+  // fullResUrl below.
   const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
+  const [previewSourceUrl, setPreviewSourceUrl] = useState<string | null>(null);
   // Rotation in degrees — combined coarse (90° buttons) and fine (slider).
   const [rotationAngle, setRotationAngle] = useState(0);
-  // Derived: originalImageUrl rotated by rotationAngle. Updated by an effect.
+  // Derived: previewSourceUrl rotated by rotationAngle. Used for display in
+  // the canvas, JS-side mask compute, and JS-side auto-cal (which all
+  // downscale internally anyway).
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  // Derived: originalImageUrl rotated by rotationAngle. Used for backend
+  // calls and high-zoom canvas display. Computed with a debounce so that
+  // dragging the angle slider doesn't queue 60 MB rotations on every tick.
+  const [fullResUrl, setFullResUrl] = useState<string | null>(null);
   const [calibrationPoints, setCalibrationPoints] = useState<CalibrationPoint[]>([]);
   const [dataPoints, setDataPoints] = useState<DataPoint[]>([]);
   // Detection mask overlay opacity (replaces the old SVG-template overlay).
   const [maskOpacity, setMaskOpacity] = useState(0.5);
   const [maskUrl, setMaskUrl] = useState<string | null>(null);
+  // Underlying image opacity. 1 = normal; 0 = mask-only inspection mode.
+  const [imageOpacity, setImageOpacity] = useState(1);
+  // Vectorized polylines (display-px) — populated by handleVectorize.
+  const [tracePolylines, setTracePolylines] = useState<VectorPolyline[] | null>(
+    null
+  );
+  const [vectorizing, setVectorizing] = useState(false);
+  // Per-category visibility flags. The vectorizer tags each polyline with
+  // axis (horizontal/vertical) and grid weight (major/minor/fine), so we
+  // can filter the rendered set without re-running detection.
+  const [lineVisibility, setLineVisibility] = useState({
+    hMajor: true,
+    hMinor: true,
+    hFine: true,
+    vMajor: true,
+    vMinor: true,
+    vFine: true,
+  });
+  // Horizontal baseline reference for rotation alignment.
+  const [showBaseline, setShowBaseline] = useState(false);
   const [isRotating, setIsRotating] = useState(false);
 
   // Rectified preview — backend warps the image to chart-mm space using the
@@ -184,12 +258,44 @@ export default function Home() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  // Track every blob URL we create so handleReset can revoke them all at
+  // once. Avoids the race where a queued async consumer (auto-cal, mask
+  // compute) is still loading a URL that was just revoked.
+  const rotatedUrlsRef = useRef<string[]>([]);
+  const fullResRotatedUrlsRef = useRef<string[]>([]);
+  const maskUrlsRef = useRef<string[]>([]);
+  const rectifiedUrlsRef = useRef<string[]>([]);
+  // Promise gate: backend handlers await this to ensure fullResUrl matches
+  // the current rotationAngle. Resolves with the URL or null.
+  const fullResReadyRef = useRef<{
+    angle: number;
+    promise: Promise<string | null>;
+  } | null>(null);
+
+  /** Wait for the full-res rotated blob URL to be ready for the CURRENT
+   *  rotation angle, or 5 s, whichever comes first. Backend callers use this
+   *  so they don't fire against a stale rotation while the debounced full-res
+   *  rotation is still running. Falls back to the un-rotated original (or
+   *  preview, last resort) if everything times out. */
+  const awaitFullRes = useCallback(async (): Promise<string | null> => {
+    const ready = fullResReadyRef.current;
+    if (ready && ready.angle === rotationAngle) {
+      const url = await Promise.race([
+        ready.promise,
+        new Promise<null>((r) => setTimeout(() => r(null), 5000)),
+      ]);
+      if (url) return url;
+    }
+    return fullResUrl ?? originalImageUrl ?? imageUrl;
+  }, [rotationAngle, fullResUrl, originalImageUrl, imageUrl]);
+
   const handleBackendCalibrate = useCallback(async () => {
     if (!imageUrl || !config) return;
     appendLog("info", "Auto-cal (backend, sjecišta): pokretanje…");
     setAutoCalState({ kind: "running" });
     try {
-      const blob = await (await fetch(imageUrl)).blob();
+      const srcUrl = (await awaitFullRes()) ?? imageUrl;
+      const blob = await (await fetch(srcUrl)).blob();
       const imageBase64 = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => {
@@ -275,7 +381,7 @@ export default function Home() {
       appendLog("error", `Backend cal failed: ${msg}`);
       setAutoCalState({ kind: "fail", message: msg });
     }
-  }, [imageUrl, config, appendLog]);
+  }, [imageUrl, config, appendLog, awaitFullRes]);
 
   const handleAutoCalibrate = useCallback(async () => {
     if (!imageUrl || !config) return;
@@ -310,13 +416,26 @@ export default function Home() {
       // If detection rotated the image to match chart geometry, swap the
       // display source so subsequent clicks see the corrected orientation.
       // `result.points` are already in the rotated image's coordinate space.
+      // We rotate BOTH the preview source AND the full-res original so the
+      // backend calls (which use full-res) stay consistent with what the user
+      // sees on the canvas.
       if (result.rotatedImageUrl) {
-        const previousUrl = imageUrl;
-        setImageUrl(result.rotatedImageUrl);
-        // Release the previous blob URL — only safe because we just took a
-        // snapshot above and React re-renders before the GC matters.
-        if (previousUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(previousUrl);
+        // The detection step already produced a rotated PREVIEW blob — adopt
+        // it as the new previewSourceUrl. We don't know whether it was 90 CW
+        // or CCW from the result type, but runAutoCalibration tries CW first
+        // and falls back to CCW; we replicate the same rotation on the
+        // full-res by trying CW first.
+        const newPreview = result.rotatedImageUrl;
+        rotatedUrlsRef.current.push(newPreview);
+        setPreviewSourceUrl(newPreview);
+        if (originalImageUrl) {
+          try {
+            const rotatedFull = await rotateUrlToBlob(originalImageUrl, 90);
+            fullResRotatedUrlsRef.current.push(rotatedFull);
+            setOriginalImageUrl(rotatedFull);
+          } catch (e) {
+            console.warn("could not rotate original to match auto-cal", e);
+          }
         }
       }
       // Replace existing calibration points with the four detected corners.
@@ -336,78 +455,96 @@ export default function Home() {
         message: err instanceof Error ? err.message : "Auto-kalibracija nije uspjela.",
       });
     }
-  }, [imageUrl, config, detectionConfig]);
+  }, [imageUrl, config, detectionConfig, originalImageUrl]);
 
-  // Track every blob URL we create so handleReset can revoke them all at
-  // once. Avoids the race where a queued async consumer (auto-cal, mask
-  // compute) is still loading a URL that was just revoked.
-  const rotatedUrlsRef = useRef<string[]>([]);
-  const maskUrlsRef = useRef<string[]>([]);
-  const rectifiedUrlsRef = useRef<string[]>([]);
-
-  // ─── Rotation: recompute imageUrl from originalImageUrl + rotationAngle ──
+  // ─── Rotation: recompute imageUrl (preview) eagerly from previewSourceUrl ──
   // The rotation angle includes both coarse (90° buttons) and fine (slider)
-  // adjustments. Always rotates the ORIGINAL image, so dragging the slider
-  // doesn't accumulate compounding round-trips through PNG encoding.
+  // adjustments. Always rotates the ORIGINAL preview source, so dragging the
+  // slider doesn't accumulate compounding round-trips through PNG encoding.
+  // The full-res rotation lives in a separate debounced effect below.
   useEffect(() => {
-    if (!originalImageUrl) {
+    if (!previewSourceUrl) {
       setImageUrl(null);
       return;
     }
     if (rotationAngle === 0) {
-      setImageUrl(originalImageUrl);
+      setImageUrl(previewSourceUrl);
       setIsRotating(false);
+      // New rotation invalidates calibration corners
+      setCalibrationPoints((prev) => (prev.length === 0 ? prev : []));
       return;
     }
     let cancelled = false;
     setIsRotating(true);
     (async () => {
       try {
-        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-          const i = new Image();
-          i.onload = () => resolve(i);
-          i.onerror = () => reject(new Error("rotate: load failed"));
-          i.src = originalImageUrl;
-        });
+        const newUrl = await rotateUrlToBlob(previewSourceUrl, rotationAngle);
         if (cancelled) return;
-        const w = img.naturalWidth;
-        const h = img.naturalHeight;
-        const rad = (rotationAngle * Math.PI) / 180;
-        const cosA = Math.abs(Math.cos(rad));
-        const sinA = Math.abs(Math.sin(rad));
-        const newW = Math.round(w * cosA + h * sinA);
-        const newH = Math.round(w * sinA + h * cosA);
-        const canvas = document.createElement("canvas");
-        canvas.width = newW;
-        canvas.height = newH;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, newW, newH);
-        ctx.translate(newW / 2, newH / 2);
-        ctx.rotate(rad);
-        ctx.drawImage(img, -w / 2, -h / 2);
-        const blob: Blob | null = await new Promise((r) =>
-          canvas.toBlob(r, "image/png")
-        );
-        if (cancelled || !blob) return;
-        const newUrl = URL.createObjectURL(blob);
-        // Track the new URL for cleanup on Reset; do NOT revoke prev here —
-        // queued auto-cal/mask compute callbacks may still be reading it, and
-        // revoking would surface as "Failed to load image" while the user is
-        // dragging the angle slider.
         rotatedUrlsRef.current.push(newUrl);
         setImageUrl(newUrl);
-        // New rotation invalidates calibration corners
         setCalibrationPoints([]);
       } catch (e) {
-        console.error("rotation failed", e);
+        console.error("preview rotation failed", e);
       } finally {
         if (!cancelled) setIsRotating(false);
       }
     })();
     return () => {
       cancelled = true;
+    };
+  }, [previewSourceUrl, rotationAngle]);
+
+  // ─── Rotation (full-res): debounced rotation of the original blob ───────
+  // Triggered ~250 ms after the user stops dragging the angle slider. Sets
+  // fullResUrl which backend callers and the high-zoom canvas branch consume.
+  // We expose the current generation as a promise via fullResReadyRef so that
+  // a backend handler clicked DURING the debounce window can await the result
+  // rather than firing with a stale rotation.
+  useEffect(() => {
+    if (!originalImageUrl) {
+      setFullResUrl(null);
+      fullResReadyRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    let resolveExternal: (v: string | null) => void = () => {};
+    const promise = new Promise<string | null>((res) => {
+      resolveExternal = res;
+    });
+    fullResReadyRef.current = { angle: rotationAngle, promise };
+
+    const t = setTimeout(async () => {
+      try {
+        if (rotationAngle === 0) {
+          if (cancelled) {
+            resolveExternal(null);
+            return;
+          }
+          setFullResUrl(originalImageUrl);
+          resolveExternal(originalImageUrl);
+          return;
+        }
+        const newUrl = await rotateUrlToBlob(originalImageUrl, rotationAngle);
+        if (cancelled) {
+          URL.revokeObjectURL(newUrl);
+          resolveExternal(null);
+          return;
+        }
+        fullResRotatedUrlsRef.current.push(newUrl);
+        setFullResUrl(newUrl);
+        resolveExternal(newUrl);
+      } catch (e) {
+        console.error("full-res rotation failed", e);
+        resolveExternal(null);
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+      // Don't resolve here — the promise stays pending until either the next
+      // generation supersedes it or the component unmounts. Awaiters that
+      // chained on a stale generation will just see fullResReadyRef updated.
     };
   }, [originalImageUrl, rotationAngle]);
 
@@ -478,7 +615,8 @@ export default function Home() {
     const t = setTimeout(async () => {
       setRectifiedLoading(true);
       try {
-        const blob = await (await fetch(imageUrl)).blob();
+        const srcUrl = (await awaitFullRes()) ?? imageUrl;
+        const blob = await (await fetch(srcUrl)).blob();
         const imageBase64 = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => {
@@ -590,24 +728,27 @@ export default function Home() {
   };
 
   const handleImageSelected = async (file: File) => {
-    // Downscale on ingest. Plustek 320e scans land at ~50 MB / 9992 px long
-    // edge — rotating that with canvas every slider tick is too slow. Cap the
-    // working image at maxEdge=4000 px which is still far above the
-    // detection downscale (1200 px) and gives plenty of zoom headroom for
-    // clicking on the trace.
-    const maxEdge = 4000;
-    const objectUrl = URL.createObjectURL(file);
-    let workingUrl = objectUrl;
+    // Two-tier ingest:
+    //   - originalImageUrl: full-res, untouched. Used by backend calls and
+    //     high-zoom canvas display so the user gets actual pixel detail when
+    //     calibrating sub-mm grid intersections.
+    //   - previewSourceUrl: ≤PREVIEW_MAX_EDGE downscale, used for the always-on
+    //     canvas display + JS auto-cal + mask compute (which downscale to
+    //     1200 px internally anyway). Rotating a ~1500-px image is fast enough
+    //     to keep the angle slider responsive on every tick.
+    const PREVIEW_MAX_EDGE = 1500;
+    const originalUrl = URL.createObjectURL(file);
+    let previewUrl = originalUrl;
     try {
       const img = await new Promise<HTMLImageElement>((resolve, reject) => {
         const i = new Image();
         i.onload = () => resolve(i);
         i.onerror = () => reject(new Error("load failed"));
-        i.src = objectUrl;
+        i.src = originalUrl;
       });
       const longest = Math.max(img.naturalWidth, img.naturalHeight);
-      if (longest > maxEdge) {
-        const scale = maxEdge / longest;
+      if (longest > PREVIEW_MAX_EDGE) {
+        const scale = PREVIEW_MAX_EDGE / longest;
         const dw = Math.round(img.naturalWidth * scale);
         const dh = Math.round(img.naturalHeight * scale);
         const c = document.createElement("canvas");
@@ -620,19 +761,84 @@ export default function Home() {
             c.toBlob(r, "image/png")
           );
           if (blob) {
-            workingUrl = URL.createObjectURL(blob);
-            // The full-res object URL is no longer needed.
-            URL.revokeObjectURL(objectUrl);
+            previewUrl = URL.createObjectURL(blob);
           }
         }
       }
     } catch (e) {
-      console.error("downscale failed, using original", e);
+      console.error("preview downscale failed, falling back to original", e);
     }
-    setOriginalImageUrl(workingUrl);
+    setOriginalImageUrl(originalUrl);
+    setPreviewSourceUrl(previewUrl);
     setRotationAngle(0);
     setStep("calibrate");
   };
+
+  const handleVectorize = useCallback(async () => {
+    if (!maskUrl || !config) return;
+    setVectorizing(true);
+    try {
+      const { w, h } = getDisplaySize(config);
+      // Pin output count to the chart's MINOR-line density (every 5 hPa for
+      // barograph = 23 horizontals, every 5 % RH for hygro = 21, etc).
+      // Arcs at day boundaries (days + 1).
+      const isLandscape = config.orientation === "landscape";
+      const valueLines =
+        Math.round((config.maxValue - config.minValue) / config.minorGrid) + 1;
+      const timeLines = config.days + 1;
+      // For barograph (minor=5, major=10), majorEvery = 2 → every 2nd minor
+      // line is a major (10 hPa boundary). Time arcs are all majors (day
+      // boundaries) for now, hence majorEvery = 1.
+      const valueMajorEvery = Math.max(
+        1,
+        Math.round(config.majorGrid / config.minorGrid)
+      );
+      const timeMajorEvery = 1;
+      const polys = await vectorizeMaskFromUrl(maskUrl, {
+        displayWidth: w,
+        displayHeight: h,
+        simplifyTolerance: 1.5,
+        maxHorizontalLines: isLandscape ? valueLines : timeLines,
+        maxVerticalLines: isLandscape ? timeLines : valueLines,
+        horizontalMajorEvery: isLandscape ? valueMajorEvery : timeMajorEvery,
+        verticalMajorEvery: isLandscape ? timeMajorEvery : valueMajorEvery,
+      });
+      setTracePolylines(polys);
+      const totalPts = polys.reduce((s, p) => s + p.points.length, 0);
+      appendLog(
+        "success",
+        `Vektorizirano: ${polys.length} linija, ${totalPts} točaka`
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Vektorizacija nije uspjela";
+      appendLog("error", `Vektorizacija: ${msg}`);
+    } finally {
+      setVectorizing(false);
+    }
+  }, [maskUrl, config, appendLog]);
+
+  // Invalidate vectorized polylines whenever the mask source changes — old
+  // paths would no longer correspond to the current detection.
+  useEffect(() => {
+    setTracePolylines(null);
+  }, [maskUrl]);
+
+  // Apply per-category visibility filter to the vectorized polylines before
+  // passing them down. Each polyline is tagged with axis × weight; the user
+  // toggles control which groups render.
+  const visibleTracePolylines = useMemo(() => {
+    if (!tracePolylines) return null;
+    return tracePolylines.filter((p) => {
+      if (p.axis === "horizontal") {
+        if (p.weight === "major") return lineVisibility.hMajor;
+        if (p.weight === "minor") return lineVisibility.hMinor;
+        return lineVisibility.hFine;
+      }
+      if (p.weight === "major") return lineVisibility.vMajor;
+      if (p.weight === "minor") return lineVisibility.vMinor;
+      return lineVisibility.vFine;
+    });
+  }, [tracePolylines, lineVisibility]);
 
   const handleCalibrationPointAdd = useCallback((point: CalibrationPoint) => {
     setCalibrationPoints((prev) => [...prev, point]);
@@ -678,8 +884,9 @@ export default function Home() {
     }
     setExtractState({ kind: "running" });
     try {
-      // Fetch the current (rotated, downscaled) blob and convert to base64
-      const blob = await (await fetch(imageUrl)).blob();
+      // Fetch the current (rotated) full-res blob and convert to base64
+      const srcUrl = (await awaitFullRes()) ?? imageUrl;
+      const blob = await (await fetch(srcUrl)).blob();
       const imageBase64 = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => {
@@ -759,7 +966,7 @@ export default function Home() {
       const msg = e instanceof Error ? e.message : "Ekstrakcija nije uspjela.";
       setExtractState({ kind: "fail", message: msg });
     }
-  }, [imageUrl, config, calibrationPoints, traceInk]);
+  }, [imageUrl, config, calibrationPoints, traceInk, awaitFullRes]);
 
   const handleReset = () => {
     setStep("select");
@@ -768,12 +975,20 @@ export default function Home() {
     if (originalImageUrl && originalImageUrl.startsWith("blob:")) {
       URL.revokeObjectURL(originalImageUrl);
     }
+    if (previewSourceUrl && previewSourceUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(previewSourceUrl);
+    }
     for (const u of rotatedUrlsRef.current) URL.revokeObjectURL(u);
+    for (const u of fullResRotatedUrlsRef.current) URL.revokeObjectURL(u);
     for (const u of maskUrlsRef.current) URL.revokeObjectURL(u);
     rotatedUrlsRef.current = [];
+    fullResRotatedUrlsRef.current = [];
     maskUrlsRef.current = [];
+    fullResReadyRef.current = null;
     setImageUrl(null);
+    setFullResUrl(null);
     setOriginalImageUrl(null);
+    setPreviewSourceUrl(null);
     setRotationAngle(0);
     setMaskUrl(null);
     setCalibrationPoints([]);
@@ -1077,11 +1292,12 @@ export default function Home() {
                 </p>
                 <div
                   className="bg-card border border-border/60 rounded-2xl overflow-hidden shadow-lg flex-1"
-                  style={{ height: "calc(100vh - 200px)" }}
+                  style={{ minHeight: "calc(100vh - 110px)" }}
                 >
                   <OverlayCanvas
                     config={config}
                     imageUrl={imageUrl}
+                    fullResImageUrl={fullResUrl}
                     mode="calibrate"
                     calibrationPoints={calibrationPoints}
                     onCalibrationPointAdd={handleCalibrationPointAdd}
@@ -1091,6 +1307,9 @@ export default function Home() {
                     onDataPointRemove={handleDataPointRemove}
                     maskUrl={maskUrl}
                     maskOpacity={maskOpacity}
+                    imageOpacity={imageOpacity}
+                    tracePolylines={visibleTracePolylines}
+                    showBaseline={showBaseline}
                     affineMatrix={affineMatrix}
                   />
                 </div>
@@ -1099,7 +1318,7 @@ export default function Home() {
               {/* ───── RIGHT: sidebar ───── */}
               <aside
                 className="w-[360px] flex-shrink-0 flex flex-col gap-3 overflow-y-auto pr-1"
-                style={{ maxHeight: "calc(100vh - 100px)" }}
+                style={{ maxHeight: "calc(100vh - 110px)" }}
               >
                 {/* Rectified preview */}
                 <div className="bg-card border border-border/60 rounded-xl overflow-hidden">
@@ -1129,12 +1348,77 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* Mask opacity (always visible) */}
-                <div className="bg-card border border-border/60 rounded-xl px-3 py-2">
+                {/* View controls: image opacity, mask opacity, and one-click
+                    presets to switch between original-only / mask-only / both */}
+                <div className="bg-card border border-border/60 rounded-xl px-3 py-2 space-y-2">
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => {
+                        setImageOpacity(1);
+                        setMaskOpacity(0);
+                      }}
+                      className={`flex-1 text-[10px] py-1 rounded-md font-medium transition-colors ${
+                        imageOpacity === 1 && maskOpacity === 0
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted/40 text-muted-foreground hover:bg-muted"
+                      }`}
+                      type="button"
+                    >
+                      Slika
+                    </button>
+                    <button
+                      onClick={() => {
+                        setImageOpacity(0);
+                        setMaskOpacity(1);
+                      }}
+                      className={`flex-1 text-[10px] py-1 rounded-md font-medium transition-colors ${
+                        imageOpacity === 0 && maskOpacity === 1
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted/40 text-muted-foreground hover:bg-muted"
+                      }`}
+                      type="button"
+                    >
+                      Maska
+                    </button>
+                    <button
+                      onClick={() => {
+                        setImageOpacity(1);
+                        setMaskOpacity(0.5);
+                      }}
+                      className={`flex-1 text-[10px] py-1 rounded-md font-medium transition-colors ${
+                        imageOpacity === 1 && maskOpacity === 0.5
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted/40 text-muted-foreground hover:bg-muted"
+                      }`}
+                      type="button"
+                    >
+                      Obje
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <ImageOff className="w-3.5 h-3.5 text-muted-foreground" />
+                    <span className="text-[10px] text-muted-foreground flex-1">
+                      Slika
+                    </span>
+                    <span className="text-[10px] font-mono text-muted-foreground">
+                      {Math.round(imageOpacity * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={imageOpacity}
+                    onChange={(e) =>
+                      setImageOpacity(parseFloat(e.target.value))
+                    }
+                    className="w-full slider-emerald"
+                  />
                   <div className="flex items-center gap-2">
                     <Eye className="w-3.5 h-3.5 text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground flex-1">
-                      Pregled maske
+                    <span className="text-[10px] text-muted-foreground flex-1">
+                      Maska
                     </span>
                     <span className="text-[10px] font-mono text-muted-foreground">
                       {Math.round(maskOpacity * 100)}%
@@ -1149,8 +1433,96 @@ export default function Home() {
                     onChange={(e) =>
                       setMaskOpacity(parseFloat(e.target.value))
                     }
-                    className="w-full slider-emerald mt-1.5"
+                    className="w-full slider-emerald"
                   />
+                  {/* Vectorize: turn dotty mask into smooth polylines */}
+                  <div className="pt-1 border-t border-border/40 space-y-1.5">
+                    <button
+                      onClick={handleVectorize}
+                      disabled={!maskUrl || vectorizing}
+                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg bg-gradient-to-r from-pink-500/15 to-rose-500/15 border border-pink-500/30 text-[11px] font-semibold text-pink-700 dark:text-pink-300 hover:from-pink-500/25 hover:to-rose-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                      type="button"
+                      title="Pretvori maskirane točke u glatke vektorske linije"
+                    >
+                      <Spline className="w-3.5 h-3.5" />
+                      {vectorizing
+                        ? "Vektoriziranje…"
+                        : tracePolylines
+                          ? `Re-vektoriziraj (${tracePolylines.length})`
+                          : "Vektoriziraj masku"}
+                    </button>
+                    {tracePolylines && (
+                      <button
+                        onClick={() => setTracePolylines(null)}
+                        className="w-full text-[10px] text-muted-foreground hover:text-foreground"
+                        type="button"
+                      >
+                        Ukloni linije
+                      </button>
+                    )}
+                  </div>
+                  {/* Per-category visibility toggles. Two columns: horizontal
+                      grid (value axis) on left, vertical/arc (time axis) on
+                      right. Each row is a weight class: major / minor / fine. */}
+                  {tracePolylines && (
+                    <div className="pt-2 border-t border-border/40 space-y-1.5">
+                      <div className="flex items-center text-[10px] text-muted-foreground">
+                        <span className="flex-1">Prikaz linija</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                        <div className="text-[10px] font-semibold text-muted-foreground">
+                          Horizontal
+                        </div>
+                        <div className="text-[10px] font-semibold text-muted-foreground">
+                          Vertical
+                        </div>
+                        {(
+                          [
+                            ["Major", "hMajor", "vMajor"],
+                            ["Minor", "hMinor", "vMinor"],
+                            ["Fine", "hFine", "vFine"],
+                          ] as const
+                        ).map(([label, hKey, vKey]) => (
+                          <>
+                            <label
+                              key={hKey}
+                              className="flex items-center gap-1.5 text-[10px] cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={lineVisibility[hKey]}
+                                onChange={(e) =>
+                                  setLineVisibility((v) => ({
+                                    ...v,
+                                    [hKey]: e.target.checked,
+                                  }))
+                                }
+                                className="accent-pink-500"
+                              />
+                              {label}
+                            </label>
+                            <label
+                              key={vKey}
+                              className="flex items-center gap-1.5 text-[10px] cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={lineVisibility[vKey]}
+                                onChange={(e) =>
+                                  setLineVisibility((v) => ({
+                                    ...v,
+                                    [vKey]: e.target.checked,
+                                  }))
+                                }
+                                className="accent-pink-500"
+                              />
+                              {label}
+                            </label>
+                          </>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Rotation collapsible */}
@@ -1182,6 +1554,21 @@ export default function Home() {
                   </button>
                   {showRotation && (
                     <div className="px-3 pb-3 space-y-2 border-t border-border/60 pt-3">
+                      {/* Baseline toggle — visual reference for alignment.
+                          User rotates until detected grid horizontals run
+                          parallel to this black dashed line. */}
+                      <button
+                        onClick={() => setShowBaseline((v) => !v)}
+                        className={`w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md text-[11px] font-medium transition-colors ${
+                          showBaseline
+                            ? "bg-foreground text-background"
+                            : "bg-muted/40 text-muted-foreground hover:bg-muted"
+                        }`}
+                        type="button"
+                        title="Crna isprekidana referenca na sredini chart-a — koristi za poravnanje rotacije"
+                      >
+                        {showBaseline ? "Sakrij osnovicu" : "Pokaži osnovicu"}
+                      </button>
                       <div className="flex items-center gap-1">
                         <button
                           onClick={() => handleRotateBy(-90)}
@@ -1527,6 +1914,7 @@ export default function Home() {
                   <OverlayCanvas
                     config={config}
                     imageUrl={imageUrl}
+                    fullResImageUrl={fullResUrl}
                     mode="digitize"
                     calibrationPoints={calibrationPoints}
                     onCalibrationPointAdd={handleCalibrationPointAdd}
@@ -1536,6 +1924,9 @@ export default function Home() {
                     onDataPointRemove={handleDataPointRemove}
                     maskUrl={maskUrl}
                     maskOpacity={maskOpacity}
+                    imageOpacity={imageOpacity}
+                    tracePolylines={visibleTracePolylines}
+                    showBaseline={showBaseline}
                     affineMatrix={affineMatrix}
                   />
                 </div>

@@ -62,6 +62,72 @@ def _load_bundled_templates() -> None:
 
 _load_bundled_templates()
 
+
+# ─── ONNX trace-segmenter (optional) ──────────────────────────────────────
+# Loaded once at module import. If the model file or onnxruntime is absent,
+# falls through to the legacy HSV-based `_build_trace_mask`. The model is
+# sized for barograph-style scans (trained on synthetic data drawn over the
+# bundled barograph reference) — for hygrograph/thermograph we currently
+# stick with HSV until those reference scans are added to the training set.
+_ONNX_DIR = os.environ.get("DHMZ_MODEL_DIR", "/app/models")
+_ONNX_PATH = os.path.join(_ONNX_DIR, "trace_seg.onnx")
+_ONNX_SESSION = None
+
+try:
+    if os.path.exists(_ONNX_PATH):
+        import onnxruntime as ort
+
+        # CPU-only: backend container has no GPU. ORT picks the fastest
+        # available provider per node; CPUExecutionProvider is fine for our
+        # 1.9M-param U-Net (~80 ms/inference at 1024×1024 on a modern x86).
+        _ONNX_SESSION = ort.InferenceSession(
+            _ONNX_PATH, providers=["CPUExecutionProvider"]
+        )
+        print(f"[onnx] loaded {_ONNX_PATH}")
+    else:
+        print(f"[onnx] model not found at {_ONNX_PATH}, using HSV fallback")
+except Exception as e:
+    print(f"[onnx] init failed ({e}); using HSV fallback")
+    _ONNX_SESSION = None
+
+
+def _build_trace_mask_onnx(rectified_bgr: np.ndarray) -> Optional[np.ndarray]:
+    """Run the ONNX trace-segmenter on a rectified chart image.
+
+    Pads input to a multiple of 16 (4 downsampling stages) and crops the
+    prediction back. Returns a uint8 0/255 mask or None if the model isn't
+    available.
+    """
+    if _ONNX_SESSION is None:
+        return None
+    h, w = rectified_bgr.shape[:2]
+    nh = ((h + 15) // 16) * 16
+    nw = ((w + 15) // 16) * 16
+    pad_h = nh - h
+    pad_w = nw - w
+    if pad_h or pad_w:
+        padded = cv2.copyMakeBorder(
+            rectified_bgr, 0, pad_h, 0, pad_w, cv2.BORDER_REPLICATE
+        )
+    else:
+        padded = rectified_bgr
+    rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
+    x = rgb.astype(np.float32).transpose(2, 0, 1)[None, ...] / 255.0  # (1, 3, H, W)
+    logits = _ONNX_SESSION.run(None, {"input": x})[0]  # (1, 1, H, W)
+    prob = 1.0 / (1.0 + np.exp(-logits[0, 0]))  # sigmoid
+    prob = prob[: prob.shape[0] - pad_h, : prob.shape[1] - pad_w] if (pad_h or pad_w) else prob
+    mask = (prob > 0.5).astype(np.uint8) * 255
+
+    # Even with a learned model, we still want to suppress the green grid in
+    # case any sigmoid leakage happened — the model saw faded ink in synthetic
+    # but never saw "what if the trace IS green?", which it isn't, so this is
+    # belt-and-braces filtering.
+    hsv = cv2.cvtColor(rectified_bgr, cv2.COLOR_BGR2HSV)
+    is_green = (hsv[:, :, 0] >= 30) & (hsv[:, :, 0] <= 100) & (hsv[:, :, 1] > 20)
+    mask[is_green] = 0
+    return mask
+
+
 from .schemas import (
     ExtractTraceRequest,
     ExtractTraceResponse,
@@ -342,7 +408,30 @@ def extract_trace(req: ExtractTraceRequest, debug: bool = False) -> ExtractTrace
         except Exception as e:
             print(f"[template] path failed: {e}")
 
-    if not template_used:
+    # ONNX trace-segmenter path — used when:
+    #   - Template subtraction was not applied (template missing or returned
+    #     fewer than 100 px, indicating a bad ECC alignment).
+    #   - Model file is loaded (_ONNX_SESSION is not None).
+    # Falls back to the legacy HSV mask if the model is unavailable or returns
+    # an empty/near-empty result (model was trained on barograph synthetic
+    # data so it may not generalize to other chart types).
+    onnx_used = False
+    if not template_used and _ONNX_SESSION is not None:
+        try:
+            t_onnx = time.perf_counter()
+            onnx_mask = _build_trace_mask_onnx(rectified)
+            timing["onnx"] = (time.perf_counter() - t_onnx) * 1000
+            if onnx_mask is not None:
+                onnx_pix = int(np.sum(onnx_mask > 0))
+                print(f"[onnx] mask: {onnx_pix} px")
+                if onnx_pix >= 50:
+                    mask = onnx_mask
+                    timing["mask"] = 0.0
+                    onnx_used = True
+        except Exception as e:
+            print(f"[onnx] inference failed: {e}; falling back to HSV")
+
+    if not template_used and not onnx_used:
         t0 = time.perf_counter()
         mask = _build_trace_mask(rectified, req.traceInk)
         timing["mask"] = (time.perf_counter() - t0) * 1000

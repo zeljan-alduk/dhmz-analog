@@ -42,3 +42,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# python
+__pycache__/
+*.pyc
+.venv*/
+
+# ml training artifacts (the deployed ONNX under backend/models is
+# committed separately; everything else is ephemeral)
+/tmp/dhmz-*
+ml/trace_seg.onnx
