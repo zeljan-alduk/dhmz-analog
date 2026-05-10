@@ -7,7 +7,12 @@ import {
   DataPoint,
   WorkflowStep,
 } from "@/lib/types";
-import { CHART_CONFIGS, getDisplaySize } from "@/lib/chart-geometry";
+import {
+  CHART_CONFIGS,
+  getDisplaySize,
+  getDayName,
+  formatHour,
+} from "@/lib/chart-geometry";
 import { computeAffineTransform } from "@/lib/transform";
 import {
   runAutoCalibration,
@@ -415,6 +420,111 @@ export default function Home() {
       prev.map((p) => (p.id === id ? { ...p, value } : p))
     );
   }, []);
+
+  // ─── Backend trace extraction (OpenCV-based autotrace) ───────────────────
+  const [extractState, setExtractState] = useState<
+    | { kind: "idle" }
+    | { kind: "running" }
+    | { kind: "success"; count: number; timingMs: Record<string, number> }
+    | { kind: "fail"; message: string }
+  >({ kind: "idle" });
+  const [traceInk, setTraceInk] = useState<"auto" | "blue" | "red" | "black">(
+    "auto"
+  );
+
+  const handleExtractTrace = useCallback(async () => {
+    if (!imageUrl || !config) return;
+    if (calibrationPoints.length < 3) {
+      setExtractState({
+        kind: "fail",
+        message: "Treba bar 3 kalibracijske točke prije ekstrakcije.",
+      });
+      return;
+    }
+    setExtractState({ kind: "running" });
+    try {
+      // Fetch the current (rotated, downscaled) blob and convert to base64
+      const blob = await (await fetch(imageUrl)).blob();
+      const imageBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const r = reader.result as string;
+          // Strip "data:image/png;base64," prefix
+          resolve(r.includes(",") ? r.split(",", 2)[1] : r);
+        };
+        reader.onerror = () => reject(new Error("read blob failed"));
+        reader.readAsDataURL(blob);
+      });
+
+      const { w: baseW, h: baseH } = getDisplaySize(config);
+
+      const body = {
+        imageBase64,
+        calibrationPoints: calibrationPoints.map((p) => ({
+          imgX: p.imgX,
+          imgY: p.imgY,
+          chartX: p.chartX,
+          chartY: p.chartY,
+        })),
+        displayWidth: baseW,
+        displayHeight: baseH,
+        config: {
+          orientation: config.orientation,
+          chartWidth: config.chartWidth,
+          chartHeight: config.chartHeight,
+          minValue: config.minValue,
+          maxValue: config.maxValue,
+          majorGrid: config.majorGrid,
+          days: config.days,
+          penArmRadius: config.penArmRadius,
+          penArmPivot: config.penArmPivot,
+          unit: config.unit,
+        },
+        samplesPerDay: 48,
+        traceInk,
+      };
+
+      const resp = await fetch("/api/extract-trace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 200)}`);
+      }
+      const data = await resp.json();
+      type BackendPoint = {
+        day: number;
+        hour: number;
+        value: number;
+        canvasX: number;
+        canvasY: number;
+      };
+      const incoming: DataPoint[] = (data.points as BackendPoint[]).map(
+        (p, i) => ({
+          id: `auto-${Date.now()}-${i}`,
+          canvasX: p.canvasX,
+          canvasY: p.canvasY,
+          day: p.day,
+          hour: p.hour,
+          value: p.value,
+          dayLabel: getDayName(p.day),
+          timeLabel: formatHour(p.hour),
+        })
+      );
+      // Replace existing data points with the auto-extracted set
+      setDataPoints(incoming);
+      setExtractState({
+        kind: "success",
+        count: incoming.length,
+        timingMs: data.diagnostics?.timingMs ?? {},
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Ekstrakcija nije uspjela.";
+      setExtractState({ kind: "fail", message: msg });
+    }
+  }, [imageUrl, config, calibrationPoints, traceInk]);
 
   const handleReset = () => {
     setStep("select");
@@ -963,6 +1073,48 @@ export default function Home() {
                   </div>
 
                   <div className="flex items-center gap-3">
+                    {/* Trace ink color picker — affects backend mask */}
+                    <div className="flex items-center gap-1 bg-card border border-border/60 rounded-xl px-2 py-1">
+                      <span className="text-xs text-muted-foreground px-1">
+                        Tinta
+                      </span>
+                      {(["auto", "blue", "red", "black"] as const).map((k) => (
+                        <button
+                          key={k}
+                          onClick={() => setTraceInk(k)}
+                          className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors ${
+                            traceInk === k
+                              ? "bg-primary text-primary-foreground"
+                              : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                          }`}
+                          type="button"
+                        >
+                          {k === "auto"
+                            ? "auto"
+                            : k === "blue"
+                            ? "plava"
+                            : k === "red"
+                            ? "crvena"
+                            : "crna"}
+                        </button>
+                      ))}
+                    </div>
+                    {/* Backend extract trace */}
+                    <button
+                      onClick={handleExtractTrace}
+                      disabled={
+                        extractState.kind === "running" ||
+                        calibrationPoints.length < 3
+                      }
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-gradient-to-r from-violet-500/15 to-fuchsia-500/15 border border-violet-500/30 text-xs font-semibold text-violet-600 dark:text-violet-400 hover:from-violet-500/25 hover:to-fuchsia-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="OpenCV-bazirana ekstrakcija traga"
+                      type="button"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      {extractState.kind === "running"
+                        ? "Ekstrakcija…"
+                        : "Auto-extract trag"}
+                    </button>
                     <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-1.5">
                       <Eye className="w-3.5 h-3.5 text-muted-foreground" />
                       <span className="text-xs text-muted-foreground">
@@ -982,6 +1134,33 @@ export default function Home() {
                     </div>
                   </div>
                 </div>
+
+                {/* Extract status banner */}
+                {extractState.kind === "success" && (
+                  <div className="mb-2 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-700 dark:text-emerald-400 animate-fade-in">
+                    <Sparkles className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span>
+                      Ekstrahirano{" "}
+                      <span className="font-mono font-semibold">
+                        {extractState.count}
+                      </span>{" "}
+                      točaka iz traga
+                      {extractState.timingMs?.warp != null && (
+                        <span className="ml-2 text-emerald-600/70 dark:text-emerald-500/70 font-mono text-[11px]">
+                          (warp {extractState.timingMs.warp}ms · skel{" "}
+                          {extractState.timingMs.skeletonize}ms · sample{" "}
+                          {extractState.timingMs.sample}ms)
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                )}
+                {extractState.kind === "fail" && (
+                  <div className="mb-2 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-700 dark:text-amber-400">
+                    <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span>{extractState.message}</span>
+                  </div>
+                )}
 
                 <div className="text-xs text-muted-foreground mb-2 flex items-center gap-1.5">
                   <MousePointerClick className="w-3.5 h-3.5" />

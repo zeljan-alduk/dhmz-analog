@@ -1,0 +1,17 @@
+services:
+  dhmz-backend:
+    build: .
+    container_name: dhmz-backend
+    restart: unless-stopped
+    # Bind-mount app/ for fast iteration: edit code on host, restart
+    # container (no rebuild needed) to pick up changes.
+    volumes:
+      - ./app:/app/app:ro
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    networks:
+      - edge
+
+networks:
+  edge:
+    name: slovenia-transit_default
+    external: true
