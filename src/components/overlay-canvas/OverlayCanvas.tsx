@@ -366,6 +366,40 @@ export function OverlayCanvas({
               </div>
             ))}
 
+          {/* Continuous trace polyline — connects all data points in time
+              order, so dense auto-extracted output reads as a smooth line
+              rather than a swarm of dots. */}
+          {mode === "digitize" && dataPoints.length > 1 && (
+            <svg
+              width={baseW}
+              height={baseH}
+              viewBox={`0 0 ${baseW} ${baseH}`}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: baseW,
+                height: baseH,
+                pointerEvents: "none",
+              }}
+            >
+              <polyline
+                points={[...dataPoints]
+                  .sort((a, b) =>
+                    a.day !== b.day ? a.day - b.day : a.hour - b.hour
+                  )
+                  .map((p) => `${p.canvasX},${p.canvasY}`)
+                  .join(" ")}
+                fill="none"
+                stroke="#10b981"
+                strokeWidth={2}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                opacity={0.85}
+              />
+            </svg>
+          )}
+
           {/* Data points */}
           {mode === "digitize" &&
             dataPoints.map((p) => (
@@ -381,10 +415,10 @@ export function OverlayCanvas({
                 }}
               >
                 <div
-                  className={`w-[10px] h-[10px] rounded-full border-2 transition-all duration-150 ${
+                  className={`rounded-full transition-all duration-150 ${
                     hoveredPoint === p.id
-                      ? "border-primary bg-primary scale-150 shadow-lg"
-                      : "border-primary bg-primary/40"
+                      ? "w-[10px] h-[10px] border-2 border-primary bg-primary scale-150 shadow-lg -ml-[5px] -mt-[5px]"
+                      : "w-[4px] h-[4px] bg-primary/70 -ml-[2px] -mt-[2px]"
                   }`}
                 />
                 {hoveredPoint === p.id && (

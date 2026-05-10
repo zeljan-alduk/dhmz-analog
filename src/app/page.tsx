@@ -157,6 +157,90 @@ export default function Home() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  const handleBackendCalibrate = useCallback(async () => {
+    if (!imageUrl || !config) return;
+    setAutoCalState({ kind: "running" });
+    try {
+      const blob = await (await fetch(imageUrl)).blob();
+      const imageBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const r = reader.result as string;
+          resolve(r.includes(",") ? r.split(",", 2)[1] : r);
+        };
+        reader.onerror = () => reject(new Error("read blob failed"));
+        reader.readAsDataURL(blob);
+      });
+      const { w: baseW, h: baseH } = getDisplaySize(config);
+      const body = {
+        imageBase64,
+        config: {
+          orientation: config.orientation,
+          chartWidth: config.chartWidth,
+          chartHeight: config.chartHeight,
+          minValue: config.minValue,
+          maxValue: config.maxValue,
+          majorGrid: config.majorGrid,
+          days: config.days,
+          penArmRadius: config.penArmRadius,
+          penArmPivot: config.penArmPivot,
+          unit: config.unit,
+        },
+        displayWidth: baseW,
+        displayHeight: baseH,
+      };
+      const resp = await fetch("/api/calibrate-grid", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 200)}`);
+      }
+      const data = await resp.json();
+      type BackendCal = {
+        imgX: number;
+        imgY: number;
+        chartX: number;
+        chartY: number;
+      };
+      const cal: CalibrationPoint[] = (data.points as BackendCal[]).map(
+        (p, i) => ({
+          id: `bg-cal-${Date.now()}-${i}`,
+          imgX: p.imgX,
+          imgY: p.imgY,
+          chartX: p.chartX,
+          chartY: p.chartY,
+          meta: { day: 0, hour: 0, value: 0 },
+        })
+      );
+      setCalibrationPoints(cal);
+      setAutoCalState({
+        kind: "success",
+        result: {
+          points: cal,
+          confidence: 0.9,
+          rotated: false,
+          rotatedImageUrl: null,
+          diagnostics: {
+            detectedCols: data.diagnostics?.detectedVerticals ?? 0,
+            detectedRows: data.diagnostics?.detectedHorizontals ?? 0,
+            expectedCols: 0,
+            expectedRows: 0,
+            colsRms: 0,
+            rowsRms: 0,
+            imageWidth: 0,
+            imageHeight: 0,
+          },
+        },
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Backend calibration failed";
+      setAutoCalState({ kind: "fail", message: msg });
+    }
+  }, [imageUrl, config]);
+
   const handleAutoCalibrate = useCallback(async () => {
     if (!imageUrl || !config) return;
     hasRunAutoCalRef.current = true;
@@ -859,17 +943,27 @@ export default function Home() {
                   </button>
                 </div>
 
-                {/* Auto-detect button */}
+                {/* Auto-detect (JS frontend) */}
                 <button
                   onClick={handleAutoCalibrate}
                   disabled={autoCalState.kind === "running"}
                   className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gradient-to-r from-violet-500/15 to-fuchsia-500/15 border border-violet-500/30 text-xs font-semibold text-violet-600 dark:text-violet-400 hover:from-violet-500/25 hover:to-fuchsia-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Automatska detekcija rešetke"
+                  title="Automatska detekcija (JS, 1D projekcija)"
                 >
                   <Sparkles className="w-3.5 h-3.5" />
                   {autoCalState.kind === "running"
                     ? "Detektiranje..."
                     : "Auto-detect"}
+                </button>
+                {/* Auto-detect via backend (intersections) */}
+                <button
+                  onClick={handleBackendCalibrate}
+                  disabled={autoCalState.kind === "running"}
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gradient-to-r from-emerald-500/15 to-teal-500/15 border border-emerald-500/30 text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:from-emerald-500/25 hover:to-teal-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Backend kalibracija (sjecišta linija)"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Auto-cal (sjecišta)
                 </button>
 
                 {/* Detection mask overlay opacity (replaces old Predložak) */}
