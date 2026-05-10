@@ -15,7 +15,10 @@ services:
       # missing the backend falls back to the legacy HSV trace mask, so this
       # mount is optional in principle but expected in production.
       - ./models:/app/models:ro
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    # workers=1 — session state lives in process memory; multiple workers
+    # don't share STORE so requests round-robin'd to a different worker
+    # would 404. If we ever move sessions to Redis/SQLite this can go up.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     networks:
       - edge
 

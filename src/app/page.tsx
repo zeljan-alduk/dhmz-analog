@@ -27,6 +27,10 @@ import { OverlayCanvas } from "@/components/overlay-canvas/OverlayCanvas";
 import { DataTable } from "@/components/data-table/DataTable";
 import { useTheme } from "@/components/ThemeProvider";
 import {
+  SessionBanner,
+  type SessionInfo,
+} from "@/components/session-banner/SessionBanner";
+import {
   Gauge,
   Droplets,
   Thermometer,
@@ -168,6 +172,10 @@ export default function Home() {
   // fullResUrl below.
   const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
   const [previewSourceUrl, setPreviewSourceUrl] = useState<string | null>(null);
+  // Session created against /api/sessions after upload. When set, the
+  // SessionBanner modal is shown so the user can hand the URL to Claude.
+  const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
+  const [sessionBannerOpen, setSessionBannerOpen] = useState(false);
   // Rotation in degrees — combined coarse (90° buttons) and fine (slider).
   const [rotationAngle, setRotationAngle] = useState(0);
   // Derived: previewSourceUrl rotated by rotationAngle. Used for display in
@@ -772,23 +780,139 @@ export default function Home() {
     setPreviewSourceUrl(previewUrl);
     setRotationAngle(0);
     setStep("calibrate");
+    // Fire session creation in the background so the banner can pop up
+    // as soon as the backend responds. Failure is silent — user can still
+    // calibrate locally.
+    if (chartType) {
+      void createSessionForUpload(file, chartType);
+    }
+  };
+
+  const createSessionForUpload = async (file: File, type: ChartType) => {
+    try {
+      const cfg = CHART_CONFIGS[type];
+      const blob = file;
+      const imageBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const r = reader.result as string;
+          resolve(r.includes(",") ? r.split(",", 2)[1] : r);
+        };
+        reader.onerror = () => reject(new Error("read blob failed"));
+        reader.readAsDataURL(blob);
+      });
+      const resp = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageBase64,
+          chartType: type,
+          config: {
+            orientation: cfg.orientation,
+            chartWidth: cfg.chartWidth,
+            chartHeight: cfg.chartHeight,
+            minValue: cfg.minValue,
+            maxValue: cfg.maxValue,
+            majorGrid: cfg.majorGrid,
+            days: cfg.days,
+            penArmRadius: cfg.penArmRadius,
+            penArmPivot: cfg.penArmPivot,
+            unit: cfg.unit,
+          },
+        }),
+      });
+      if (!resp.ok) {
+        console.warn("session create failed", resp.status);
+        return;
+      }
+      const info = (await resp.json()) as SessionInfo;
+      setSessionInfo(info);
+      setSessionBannerOpen(true);
+    } catch (e) {
+      console.warn("session create error", e);
+    }
   };
 
   const handleVectorize = useCallback(async () => {
-    if (!maskUrl || !config) return;
+    if (!config) return;
     setVectorizing(true);
     try {
       const { w, h } = getDisplaySize(config);
-      // Pin output count to the chart's MINOR-line density (every 5 hPa for
-      // barograph = 23 horizontals, every 5 % RH for hygro = 21, etc).
-      // Arcs at day boundaries (days + 1).
+
+      // PRIMARY: backend reference-template alignment. Backend has the
+      // empty-chart reference loaded with all major/minor/fine grid lines
+      // pre-computed analytically. We align user image to reference via
+      // ECC and warp those polylines back. Robust to scan distortion,
+      // gives correct major/minor/fine classification for free.
+      try {
+        const srcUrl = (await awaitFullRes()) ?? imageUrl;
+        if (srcUrl) {
+          const blob = await (await fetch(srcUrl)).blob();
+          const imageBase64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const r = reader.result as string;
+              resolve(r.includes(",") ? r.split(",", 2)[1] : r);
+            };
+            reader.onerror = () => reject(new Error("read blob failed"));
+            reader.readAsDataURL(blob);
+          });
+          const resp = await fetch("/api/vectorize-grid", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              imageBase64,
+              config: {
+                orientation: config.orientation,
+                chartWidth: config.chartWidth,
+                chartHeight: config.chartHeight,
+                minValue: config.minValue,
+                maxValue: config.maxValue,
+                majorGrid: config.majorGrid,
+                days: config.days,
+                penArmRadius: config.penArmRadius,
+                penArmPivot: config.penArmPivot,
+                unit: config.unit,
+              },
+              displayWidth: w,
+              displayHeight: h,
+            }),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            const polys: VectorPolyline[] = data.polylines.map(
+              (p: { points: number[][]; axis: string; weight: string }) => ({
+                points: p.points,
+                axis: p.axis as "horizontal" | "vertical",
+                weight: p.weight as "major" | "minor" | "fine",
+              })
+            );
+            setTracePolylines(polys);
+            appendLog(
+              "success",
+              `Reference vectorize: ${polys.length} polylines (${data.diagnostics.horizontalCount}H + ${data.diagnostics.arcCount}V), ECC ${Math.round(data.diagnostics.timingMs?.ecc ?? 0)}ms`
+            );
+            return;
+          }
+          const txt = await resp.text();
+          appendLog(
+            "warn",
+            `Backend vectorize ${resp.status}, fallback na klijent: ${txt.slice(0, 120)}`
+          );
+        }
+      } catch (e) {
+        appendLog(
+          "warn",
+          `Backend vectorize error, fallback na klijent: ${e instanceof Error ? e.message : "?"}`
+        );
+      }
+
+      // FALLBACK: client-side mask-based vectorizer.
+      if (!maskUrl) return;
       const isLandscape = config.orientation === "landscape";
       const valueLines =
         Math.round((config.maxValue - config.minValue) / config.minorGrid) + 1;
       const timeLines = config.days + 1;
-      // For barograph (minor=5, major=10), majorEvery = 2 → every 2nd minor
-      // line is a major (10 hPa boundary). Time arcs are all majors (day
-      // boundaries) for now, hence majorEvery = 1.
       const valueMajorEvery = Math.max(
         1,
         Math.round(config.majorGrid / config.minorGrid)
@@ -807,7 +931,7 @@ export default function Home() {
       const totalPts = polys.reduce((s, p) => s + p.points.length, 0);
       appendLog(
         "success",
-        `Vektorizirano: ${polys.length} linija, ${totalPts} točaka`
+        `Vektorizirano (klijent): ${polys.length} linija, ${totalPts} točaka`
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Vektorizacija nije uspjela";
@@ -815,7 +939,7 @@ export default function Home() {
     } finally {
       setVectorizing(false);
     }
-  }, [maskUrl, config, appendLog]);
+  }, [maskUrl, imageUrl, config, appendLog, awaitFullRes]);
 
   // Invalidate vectorized polylines whenever the mask source changes — old
   // paths would no longer correspond to the current detection.
@@ -995,6 +1119,8 @@ export default function Home() {
     setDataPoints([]);
     setAutoCalState({ kind: "idle" });
     hasRunAutoCalRef.current = false;
+    setSessionInfo(null);
+    setSessionBannerOpen(false);
   };
 
   const stepIndex = STEPS.findIndex((s) => s.key === step);
@@ -1945,6 +2071,12 @@ export default function Home() {
           </div>
         )}
       </main>
+      {sessionInfo && sessionBannerOpen && (
+        <SessionBanner
+          info={sessionInfo}
+          onDismiss={() => setSessionBannerOpen(false)}
+        />
+      )}
     </div>
   );
 }

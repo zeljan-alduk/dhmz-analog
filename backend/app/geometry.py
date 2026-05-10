@@ -51,6 +51,25 @@ def chart_to_value(chart_x: float, chart_y: float, config: ChartConfig) -> Tuple
     return day, hour, value
 
 
+def value_to_chart(day: int, hour: float, value: float, config: ChartConfig) -> Tuple[float, float]:
+    """Inverse of chart_to_value: (day, hour, value) → (chart_x, chart_y) in mm.
+
+    Mirrors `valueToChart` in src/lib/chart-geometry.ts. Returned coordinates
+    follow the same axis convention as compute_affine's `chartX`/`chartY`.
+    """
+    value_range = config.maxValue - config.minValue
+    total_day = day + hour / 24.0
+    if config.orientation == "landscape":
+        chart_y = config.chartHeight * (config.maxValue - value) / value_range
+        true_time_x = total_day * (config.chartWidth / config.days)
+        chart_x = true_time_x - arc_sag(chart_y, config.penArmRadius, config.penArmPivot)
+    else:
+        chart_x = config.chartWidth * (value - config.minValue) / value_range
+        true_time_y = total_day * (config.chartHeight / config.days)
+        chart_y = true_time_y - arc_sag(chart_x, config.penArmRadius, config.penArmPivot)
+    return chart_x, chart_y
+
+
 def compute_affine(cal_points) -> np.ndarray:
     """Compute affine transform display-px → chart-mm via least squares.
 

@@ -1428,3 +1428,29 @@ piksel-level pattern matching.
 ---
 
 **Kraj plana. Reci `da` za Phase 1.**
+
+---
+
+## Status — sve faze gotove (2026-05-10)
+
+- [x] Phase 1 — `backend/app/sessions.py` core CRUD
+- [x] Phase 1.5 — full operator projection surface (annotations, ROIs,
+  panels, scratch-HTML, image swap)
+- [x] Phase 2 — `/context` markdown briefing (~13 KB)
+- [x] Phase 4 — `src/app/session/page.tsx` view + chat panel
+- [x] Phase 3 — `src/components/session-banner/SessionBanner.tsx`
+- [x] Phase 5 — extract-trace, data-point CRUD, notes, CSV, chat long-poll
+- [x] Phase 6 — e2e against real `12-baro-puna-dolje.png` scan: 50 MB
+  portrait → PIL rotate + image-swap → 4 calibration corners → extract
+  pulled 347 points across 8 days, range 974–988 hPa. Full chat thread,
+  observations panel, all live in browser.
+- [x] Phase 7 — CLAUDE.md updated, committed.
+
+Implementation deviations from spec:
+- Session URL `/session/?id=<sid>` (query string) instead of
+  `/session/<id>` (path segment), because static export can't pre-build
+  dynamic `[id]` paths without nginx rewrites.
+- `--workers 1` on the backend (was 2) — in-memory STORE isn't shared
+  across worker processes.
+- Long-poll uses `asyncio.sleep(0.25)` ticks instead of an
+  `asyncio.Condition`; simpler and good enough at this scale.

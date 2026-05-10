@@ -147,19 +147,27 @@ export function vectorizeStructured(
     yPeaks = yPeaks.slice();
   }
 
-  // 3. Column projection → arc-time-line X positions. Same longest-run
-  //    trick: at each column, find the longest vertical run of ink. Arc
-  //    lines (slightly curved verticals) produce long runs at their X
-  //    position. Day-label text in the top/bottom margins produces only
-  //    short runs. We also exclude horizontal-line rows because their ink
-  //    contributes a constant signal at every column.
+  // 3. Column projection → arc-time-line X positions.
+  //    We exclude:
+  //      - The TOP MARGIN (~5 % of mask) where day labels live — text strokes
+  //        there create spurious column peaks at hour-mark X positions, and
+  //        previously pulled the lattice origin off actual day boundaries.
+  //      - The BOTTOM MARGIN (~5 %) where publisher info / footer text lives.
+  //      - Rows within ±(horizBand + 1) of detected horizontals so their ink
+  //        doesn't bridge column runs.
+  //    Inside the remaining region we count longest run of ink per column,
+  //    squared, as the signal.
+  // 7% margin exclusion: trims the day-label band at the top and the
+  // publisher info at the bottom while keeping enough chart-interior
+  // signal for arc detection.
+  const marginExclude = Math.round(h * 0.07);
+  const yScanFrom = marginExclude;
+  const yScanTo = h - marginExclude;
   const colSignal = new Float32Array(w);
   for (let x = 0; x < w; x++) {
     let maxRun = 0;
     let run = 0;
-    for (let y = 0; y < h; y++) {
-      // Skip ink on detected horizontal-line rows so they don't bridge the
-      // column run and create false long runs at arbitrary X positions.
+    for (let y = yScanFrom; y < yScanTo; y++) {
       if (isNearAny(y, yPeaks, horizBand + 1)) {
         run = 0;
         continue;
@@ -672,8 +680,14 @@ function fitUniformLattice(
   let bestOrigin = 0;
   let bestSpacing = spacing;
   let bestScore = -Infinity;
-  const sMin = Math.max(2, priorSpacing * 0.75);
-  const sMax = priorSpacing * 1.25;
+  // Tight search range around the geometric prior. ±10 % is enough to
+  // absorb chart-fills-X% variation across instruments while preventing
+  // the cross-correlation from locking onto sub-major periodicity (e.g.
+  // hour-mark spacing for the time axis, where 18h spacing happens to
+  // hit hour-marks evenly across the chart and would otherwise win
+  // against the correct 24h day-boundary spacing).
+  const sMin = Math.max(2, priorSpacing * 0.9);
+  const sMax = priorSpacing * 1.1;
   for (let s = sMin; s <= sMax; s += 0.5) {
     const oMax = axisLen - (N - 1) * s;
     if (oMax <= 0) continue;

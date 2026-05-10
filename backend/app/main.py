@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Query
+import asyncio
 import logging
 import traceback
 
@@ -12,11 +13,34 @@ from .calibrate import (
     RectifyResponse,
     rectify,
 )
+from .grid_align import (
+    VectorizeGridRequest,
+    VectorizeGridResponse,
+    vectorize_grid,
+)
+from .sessions import router as sessions_router, cleanup_loop as sessions_cleanup_loop
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("dhmz")
 
 app = FastAPI(title="DHMZ Backend", version="1.0.0")
+app.include_router(sessions_router, prefix="/api")
+
+
+@app.on_event("startup")
+async def _start_session_cleanup() -> None:
+    app.state._sessions_cleanup_task = asyncio.create_task(sessions_cleanup_loop())
+
+
+@app.on_event("shutdown")
+async def _stop_session_cleanup() -> None:
+    task = getattr(app.state, "_sessions_cleanup_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 @app.get("/api/health")
@@ -56,6 +80,26 @@ def rectify_endpoint(req: RectifyRequest):
     except Exception as e:  # pragma: no cover
         log.error("rectify failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(500, f"Rectify failed: {e}")
+
+
+@app.post("/api/vectorize-grid", response_model=VectorizeGridResponse)
+def vectorize_grid_endpoint(req: VectorizeGridRequest):
+    """Reference-template-based grid vectorization.
+
+    Aligns the user's scan to the bundled empty-chart reference via ECC, then
+    transforms every cached reference grid polyline back into the user's
+    image space. Returns major / minor / fine horizontals + arcs in a single
+    call. Falls back to HTTP 503 if the chart type has no reference template
+    or if ECC alignment doesn't converge — caller is expected to fall back
+    to client-side vectorization in that case.
+    """
+    try:
+        return vectorize_grid(req)
+    except ValueError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:  # pragma: no cover
+        log.error("vectorize-grid failed: %s\n%s", e, traceback.format_exc())
+        raise HTTPException(500, f"Vectorize-grid failed: {e}")
 
 
 @app.post("/api/calibrate-grid", response_model=CalibrateGridResponse)
