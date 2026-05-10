@@ -168,16 +168,50 @@ export function OverlayCanvas({
       e.preventDefault();
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const mouseX = e.clientX - rect.left;
-      const mouseY = e.clientY - rect.top;
-      const oldZoom = zoom;
-      const newZoom = Math.min(20, Math.max(0.5, zoom * (e.deltaY < 0 ? 1.15 : 0.87)));
-      const scale = newZoom / oldZoom;
-      setPan({
-        x: mouseX - scale * (mouseX - pan.x),
-        y: mouseY - scale * (mouseY - pan.y),
-      });
-      setZoom(newZoom);
+
+      // Distinguish ZOOM (pinch / Ctrl-wheel / mouse wheel) from PAN
+      // (trackpad two-finger drag).
+      //
+      //   - Pinch on macOS trackpad = Ctrl+wheel (browsers synthesize this)
+      //   - Cmd+wheel on Mac, Ctrl+wheel on Windows/Linux = explicit zoom
+      //   - Trackpad two-finger drag = wheel with horizontal delta and/or
+      //     fractional / small vertical delta
+      //   - Traditional mouse wheel = large integer-valued vertical delta
+      //
+      // Heuristic: zoom on Ctrl/Meta or "mouse-shaped" wheel events;
+      // otherwise pan. This gives correct behaviour on Mac trackpads
+      // (drag-to-pan) while preserving wheel-zoom for users on a mouse.
+      const isModifierZoom = e.ctrlKey || e.metaKey;
+      const hasHorizontal = Math.abs(e.deltaX) > 0;
+      const isFractional = !Number.isInteger(e.deltaY);
+      const looksLikeTrackpad =
+        hasHorizontal || isFractional || Math.abs(e.deltaY) < 40;
+
+      if (isModifierZoom || !looksLikeTrackpad) {
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        const oldZoom = zoom;
+        // Smoother zoom factor for pinch (small delta) and a snappier one
+        // for mouse wheel (large delta).
+        const factor = isModifierZoom
+          ? Math.exp(-e.deltaY * 0.01)
+          : e.deltaY < 0
+            ? 1.15
+            : 0.87;
+        const newZoom = Math.min(20, Math.max(0.5, zoom * factor));
+        const scale = newZoom / oldZoom;
+        setPan({
+          x: mouseX - scale * (mouseX - pan.x),
+          y: mouseY - scale * (mouseY - pan.y),
+        });
+        setZoom(newZoom);
+      } else {
+        // Two-finger trackpad drag → pan in both axes
+        setPan({
+          x: pan.x - e.deltaX,
+          y: pan.y - e.deltaY,
+        });
+      }
     },
     [zoom, pan]
   );
