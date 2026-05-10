@@ -21,7 +21,6 @@ import {
   type DetectionConfig,
   DETECTION_DEFAULTS,
 } from "@/lib/auto-calibration";
-import { ChartSVG } from "@/components/chart-template/ChartSVG";
 import { ImageUpload } from "@/components/image-upload/ImageUpload";
 import { OverlayCanvas } from "@/components/overlay-canvas/OverlayCanvas";
 import { DataTable } from "@/components/data-table/DataTable";
@@ -132,6 +131,34 @@ export default function Home() {
   const [maskUrl, setMaskUrl] = useState<string | null>(null);
   const [isRotating, setIsRotating] = useState(false);
 
+  // Rectified preview — backend warps the image to chart-mm space using the
+  // current calibration. If the preview looks like a perfectly axis-aligned
+  // grid, calibration is correct.
+  const [rectifiedUrl, setRectifiedUrl] = useState<string | null>(null);
+  const [rectifiedLoading, setRectifiedLoading] = useState(false);
+
+  // Activity log — captures every auto-detect / auto-cal / rotate / etc.
+  // event so the user can see what happened. Newest first.
+  type LogEntry = {
+    t: number;
+    kind: "info" | "success" | "warn" | "error";
+    text: string;
+  };
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const appendLog = useCallback(
+    (kind: LogEntry["kind"], text: string) => {
+      setLogs((prev) =>
+        [{ t: Date.now(), kind, text }, ...prev].slice(0, 50)
+      );
+    },
+    []
+  );
+
+  // Collapsible advanced sections
+  const [showRotation, setShowRotation] = useState(false);
+  const [showDetectionParams, setShowDetectionParams] = useState(false);
+  const [showLog, setShowLog] = useState(false);
+
   const config = chartType ? CHART_CONFIGS[chartType] : null;
 
   // Compute the affine transform whenever calibration points change.
@@ -159,6 +186,7 @@ export default function Home() {
 
   const handleBackendCalibrate = useCallback(async () => {
     if (!imageUrl || !config) return;
+    appendLog("info", "Auto-cal (backend, sjecišta): pokretanje…");
     setAutoCalState({ kind: "running" });
     try {
       const blob = await (await fetch(imageUrl)).blob();
@@ -216,6 +244,13 @@ export default function Home() {
         })
       );
       setCalibrationPoints(cal);
+      const horiz = data.diagnostics?.detectedHorizontals ?? 0;
+      const vert = data.diagnostics?.detectedVerticals ?? 0;
+      const angle = data.diagnostics?.dominantAngleDeg ?? 0;
+      appendLog(
+        "success",
+        `Backend cal: ${cal.length} kutova, ${horiz}H × ${vert}V linija, kut ${angle.toFixed(2)}°`
+      );
       setAutoCalState({
         kind: "success",
         result: {
@@ -224,8 +259,8 @@ export default function Home() {
           rotated: false,
           rotatedImageUrl: null,
           diagnostics: {
-            detectedCols: data.diagnostics?.detectedVerticals ?? 0,
-            detectedRows: data.diagnostics?.detectedHorizontals ?? 0,
+            detectedCols: vert,
+            detectedRows: horiz,
             expectedCols: 0,
             expectedRows: 0,
             colsRms: 0,
@@ -237,9 +272,10 @@ export default function Home() {
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Backend calibration failed";
+      appendLog("error", `Backend cal failed: ${msg}`);
       setAutoCalState({ kind: "fail", message: msg });
     }
-  }, [imageUrl, config]);
+  }, [imageUrl, config, appendLog]);
 
   const handleAutoCalibrate = useCallback(async () => {
     if (!imageUrl || !config) return;
@@ -250,6 +286,7 @@ export default function Home() {
       // is the single source of truth for the (DISPLAY_SCALE × mm) sizing.
       const { w: baseW, h: baseH } = getDisplaySize(config);
 
+      appendLog("info", "Auto-detect (JS): pokretanje…");
       const result = await runAutoCalibration(
         imageUrl,
         config,
@@ -258,6 +295,7 @@ export default function Home() {
         detectionConfig
       );
       if (!result) {
+        appendLog("error", "Auto-detect: rešetka nije detektirana");
         setAutoCalState({
           kind: "fail",
           message:
@@ -265,6 +303,10 @@ export default function Home() {
         });
         return;
       }
+      appendLog(
+        "success",
+        `Auto-detect: ${result.points.length} točaka, povjerenje ${(result.confidence * 100).toFixed(0)}%, RMS ${result.diagnostics.colsRms.toFixed(2)}/${result.diagnostics.rowsRms.toFixed(2)} px`
+      );
       // If detection rotated the image to match chart geometry, swap the
       // display source so subsequent clicks see the corrected orientation.
       // `result.points` are already in the rotated image's coordinate space.
@@ -301,6 +343,7 @@ export default function Home() {
   // compute) is still loading a URL that was just revoked.
   const rotatedUrlsRef = useRef<string[]>([]);
   const maskUrlsRef = useRef<string[]>([]);
+  const rectifiedUrlsRef = useRef<string[]>([]);
 
   // ─── Rotation: recompute imageUrl from originalImageUrl + rotationAngle ──
   // The rotation angle includes both coarse (90° buttons) and fine (slider)
@@ -369,17 +412,24 @@ export default function Home() {
   }, [originalImageUrl, rotationAngle]);
 
   /** Coarse 90°/180° buttons: bump rotationAngle and let the effect recompute. */
-  const handleRotateBy = useCallback((delta: 90 | -90 | 180) => {
-    setRotationAngle((a) => {
-      const next = a + delta;
-      // Normalize to (-180, 180]
-      let n = next % 360;
-      if (n > 180) n -= 360;
-      if (n <= -180) n += 360;
-      return n;
-    });
-    setAutoCalState({ kind: "idle" });
-  }, []);
+  const handleRotateBy = useCallback(
+    (delta: 90 | -90 | 180) => {
+      setRotationAngle((a) => {
+        const next = a + delta;
+        // Normalize to (-180, 180]
+        let n = next % 360;
+        if (n > 180) n -= 360;
+        if (n <= -180) n += 360;
+        appendLog(
+          "info",
+          `Rotacija ${delta > 0 ? "+" : ""}${delta}° → ${n.toFixed(0)}°`
+        );
+        return n;
+      });
+      setAutoCalState({ kind: "idle" });
+    },
+    [appendLog]
+  );
 
   // ─── Mask overlay: recompute whenever the image or detection config change ──
   // Don't revoke previous URLs eagerly — queued auto-cal/mask consumers may
@@ -411,6 +461,107 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageUrl, JSON.stringify(detectionConfig), step]);
 
+  // ─── Rectified preview (calls /api/rectify) ──────────────────────────────
+  // Backend warps the image into chart-mm space using the current calibration
+  // corners. Result is shown in the sidebar — a perfect axis-aligned grid
+  // means calibration is correct; visible skew means it's off.
+  useEffect(() => {
+    if (!imageUrl || !config || step !== "calibrate") {
+      setRectifiedUrl(null);
+      return;
+    }
+    if (calibrationPoints.length < 3) {
+      setRectifiedUrl(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      setRectifiedLoading(true);
+      try {
+        const blob = await (await fetch(imageUrl)).blob();
+        const imageBase64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const r = reader.result as string;
+            resolve(r.includes(",") ? r.split(",", 2)[1] : r);
+          };
+          reader.onerror = () => reject(new Error("read blob failed"));
+          reader.readAsDataURL(blob);
+        });
+        const { w: baseW, h: baseH } = getDisplaySize(config);
+        const resp = await fetch("/api/rectify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            imageBase64,
+            config: {
+              orientation: config.orientation,
+              chartWidth: config.chartWidth,
+              chartHeight: config.chartHeight,
+              minValue: config.minValue,
+              maxValue: config.maxValue,
+              majorGrid: config.majorGrid,
+              days: config.days,
+              penArmRadius: config.penArmRadius,
+              penArmPivot: config.penArmPivot,
+              unit: config.unit,
+            },
+            calibrationPoints: calibrationPoints.map((p) => ({
+              imgX: p.imgX,
+              imgY: p.imgY,
+              chartX: p.chartX,
+              chartY: p.chartY,
+            })),
+            displayWidth: baseW,
+            displayHeight: baseH,
+            previewMaxEdge: 800,
+          }),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (cancelled) return;
+        setRectifiedUrl(`data:image/png;base64,${data.rectifiedBase64}`);
+      } catch (e) {
+        if (!cancelled) {
+          appendLog("warn", `Rectify failed: ${e instanceof Error ? e.message : "?"}`);
+          setRectifiedUrl(null);
+        }
+      } finally {
+        if (!cancelled) setRectifiedLoading(false);
+      }
+    }, 600);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    imageUrl,
+    JSON.stringify(
+      calibrationPoints.map((p) => [p.imgX, p.imgY, p.chartX, p.chartY])
+    ),
+    step,
+  ]);
+
+  // ─── Calibration quality indicator (derived) ─────────────────────────────
+  const calibrationQuality = useMemo<{
+    level: "none" | "poor" | "ok" | "good" | "excellent";
+    label: string;
+    color: "rose" | "amber" | "emerald";
+  }>(() => {
+    const n = calibrationPoints.length;
+    if (n === 0) return { level: "none", label: "Bez kalibracije", color: "rose" };
+    if (n < 3) return { level: "poor", label: "Nedovoljno (≥3)", color: "amber" };
+    const conf =
+      autoCalState.kind === "success"
+        ? autoCalState.result.confidence ?? 0.5
+        : 0.6;
+    if (n >= 4 && conf >= 0.7)
+      return { level: "excellent", label: "Odlično", color: "emerald" };
+    if (n >= 4 && conf >= 0.4)
+      return { level: "good", label: "Dobro", color: "emerald" };
+    return { level: "ok", label: "Prihvatljivo", color: "amber" };
+  }, [calibrationPoints.length, autoCalState]);
 
   // ─── Auto-redetect on detection-config changes (debounced) ───────────────
   // Only fires AFTER the user has run auto-detect at least once — until then,
@@ -790,18 +941,6 @@ export default function Home() {
               ))}
             </div>
 
-            {/* Chart preview */}
-            <div
-              className="animate-fade-in-up"
-              style={{ animationDelay: "300ms" }}
-            >
-              <p className="text-xs font-medium text-muted-foreground text-center mb-3 uppercase tracking-wider">
-                Primjer predloška
-              </p>
-              <div className="bg-card border border-border/60 rounded-2xl p-5 shadow-sm max-w-5xl mx-auto">
-                <ChartSVG config={CHART_CONFIGS.barograph} />
-              </div>
-            </div>
           </div>
         )}
 
@@ -827,19 +966,6 @@ export default function Home() {
               ({config.minValue}–{config.maxValue} {config.unit})
             </p>
 
-            {/* Mini chart preview */}
-            <div className="bg-card border border-border/60 rounded-xl p-4 mb-8">
-              <div
-                className={
-                  config.orientation === "landscape"
-                    ? "max-h-40"
-                    : "max-h-64 max-w-[200px] mx-auto"
-                }
-              >
-                <ChartSVG config={config} />
-              </div>
-            </div>
-
             <ImageUpload onImageSelected={handleImageSelected} />
           </div>
         )}
@@ -847,154 +973,67 @@ export default function Home() {
         {/* ═══ STEP 3: CALIBRATE ═══ */}
         {step === "calibrate" && config && imageUrl && (
           <div className="py-5 animate-fade-in">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-4">
+            {/* ═══ HEADER: minimal — back, title, quality badge, primary actions ═══ */}
+            <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+              <div className="flex items-center gap-4 min-w-0">
                 <button
                   onClick={() => setStep("upload")}
-                  className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                  className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
                 >
                   <ArrowLeft className="w-4 h-4" />
                   Natrag
                 </button>
-                <div>
+                <div className="min-w-0">
                   <h2 className="text-xl font-bold tracking-tight">
                     Kalibracija
                   </h2>
-                  <p className="text-xs text-muted-foreground">
-                    Poravnajte sliku s predloškom
+                  <p className="text-xs text-muted-foreground truncate">
+                    {config.label} · {config.minValue}–{config.maxValue} {config.unit}
                   </p>
+                </div>
+                {/* Quality badge */}
+                <div
+                  className={`hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium border whitespace-nowrap ${
+                    calibrationQuality.color === "emerald"
+                      ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-400"
+                      : calibrationQuality.color === "amber"
+                      ? "bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-400"
+                      : "bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-400"
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      calibrationQuality.color === "emerald"
+                        ? "bg-emerald-500"
+                        : calibrationQuality.color === "amber"
+                        ? "bg-amber-500"
+                        : "bg-rose-500"
+                    }`}
+                  />
+                  {calibrationQuality.label} · {calibrationPoints.length} točaka
                 </div>
               </div>
 
-              <div className="flex items-center gap-4">
-                {/* Rotate scan: clears calibration so user can re-run auto-detect */}
-                <div className="flex items-center gap-1 bg-card border border-border/60 rounded-xl px-2 py-1">
-                  <button
-                    onClick={() => handleRotateBy(-90)}
-                    disabled={autoCalState.kind === "running"}
-                    className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
-                    title="Zarotiraj 90° ulijevo"
-                    type="button"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => handleRotateBy(180)}
-                    disabled={autoCalState.kind === "running"}
-                    className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
-                    title="Zarotiraj 180° (naopako)"
-                    type="button"
-                  >
-                    <FlipVertical className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => handleRotateBy(90)}
-                    disabled={autoCalState.kind === "running"}
-                    className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
-                    title="Zarotiraj 90° udesno"
-                    type="button"
-                  >
-                    <RotateCw className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-
-                {/* Fine angle slider — ~3 arc-minute precision */}
-                <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-2">
-                  <span
-                    className={`text-xs whitespace-nowrap transition-colors ${
-                      isRotating
-                        ? "text-primary animate-pulse"
-                        : "text-muted-foreground"
-                    }`}
-                  >
-                    {isRotating ? "Rotiranje…" : "Kut"}
-                  </span>
-                  <input
-                    type="range"
-                    min={-180}
-                    max={180}
-                    step={0.05}
-                    value={rotationAngle}
-                    onChange={(e) =>
-                      setRotationAngle(parseFloat(e.target.value))
-                    }
-                    className="w-32 slider-emerald"
-                  />
-                  <input
-                    type="number"
-                    min={-180}
-                    max={180}
-                    step={0.01}
-                    value={rotationAngle.toFixed(2)}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      if (!Number.isNaN(v)) setRotationAngle(v);
-                    }}
-                    className="w-16 bg-muted/40 border border-border rounded-md px-1.5 py-0.5 text-xs font-mono font-medium text-right focus:outline-none focus:ring-1 focus:ring-primary/40"
-                  />
-                  <span className="text-xs text-muted-foreground">°</span>
-                  <button
-                    onClick={() => setRotationAngle(0)}
-                    className="ml-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                    title="Resetiraj kut"
-                    type="button"
-                  >
-                    0°
-                  </button>
-                </div>
-
-                {/* Auto-detect (JS frontend) */}
-                <button
-                  onClick={handleAutoCalibrate}
-                  disabled={autoCalState.kind === "running"}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gradient-to-r from-violet-500/15 to-fuchsia-500/15 border border-violet-500/30 text-xs font-semibold text-violet-600 dark:text-violet-400 hover:from-violet-500/25 hover:to-fuchsia-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Automatska detekcija (JS, 1D projekcija)"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  {autoCalState.kind === "running"
-                    ? "Detektiranje..."
-                    : "Auto-detect"}
-                </button>
-                {/* Auto-detect via backend (intersections) */}
+              <div className="flex items-center gap-2 flex-shrink-0">
                 <button
                   onClick={handleBackendCalibrate}
                   disabled={autoCalState.kind === "running"}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gradient-to-r from-emerald-500/15 to-teal-500/15 border border-emerald-500/30 text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:from-emerald-500/25 hover:to-teal-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Backend kalibracija (sjecišta linija)"
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold shadow-md hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Backend kalibracija — Hough na sjecišta linija"
                 >
                   <Sparkles className="w-3.5 h-3.5" />
-                  Auto-cal (sjecišta)
+                  {autoCalState.kind === "running"
+                    ? "Detektiranje…"
+                    : "Auto-kalibracija"}
                 </button>
-
-                {/* Detection mask overlay opacity (replaces old Predložak) */}
-                <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-2">
-                  <Eye className="w-3.5 h-3.5 text-muted-foreground" />
-                  <span className="text-xs text-muted-foreground whitespace-nowrap">
-                    Detekcija
-                  </span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={maskOpacity}
-                    onChange={(e) => setMaskOpacity(parseFloat(e.target.value))}
-                    className="w-28 slider-emerald"
-                  />
-                  <span className="text-xs font-mono text-muted-foreground w-8 text-right">
-                    {Math.round(maskOpacity * 100)}%
-                  </span>
-                </div>
-
-                {/* Calibration point counter */}
-                <div className="flex items-center gap-2 bg-card border border-border/60 rounded-xl px-3 py-2">
-                  <Crosshair className="w-3.5 h-3.5 text-orange-500" />
-                  <span className="text-xs font-mono font-medium">
-                    {calibrationPoints.length}
-                  </span>
-                  <span className="text-xs text-muted-foreground">točaka</span>
-                </div>
-
+                <button
+                  onClick={handleAutoCalibrate}
+                  disabled={autoCalState.kind === "running"}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-card border border-border/60 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-all disabled:opacity-40"
+                  title="JS auto-detect (1D projekcija)"
+                >
+                  Alt: JS
+                </button>
                 <button
                   onClick={() => setStep("digitize")}
                   disabled={calibrationPoints.length < 3}
@@ -1006,143 +1045,366 @@ export default function Home() {
               </div>
             </div>
 
-            <p className="text-xs text-muted-foreground mb-3">
-              Kliknite na poznate točke grafa (presjeci linija, kutovi). Min. 3.
-              <span className="text-foreground/60 ml-1">
-                Alt+klik pomicanje / Scroll zoom
-              </span>
-            </p>
-
-            {/* Auto-calibration status banner */}
-            {autoCalState.kind === "success" && (
-              <div className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-700 dark:text-emerald-400 animate-fade-in">
-                <Sparkles className="w-3.5 h-3.5 flex-shrink-0" />
-                <span className="flex-1">
-                  Detektirano:{" "}
-                  <span className="font-mono font-semibold">
-                    {autoCalState.result.diagnostics.detectedCols}×
-                    {autoCalState.result.diagnostics.detectedRows}
-                  </span>{" "}
-                  linija (očekivano{" "}
-                  <span className="font-mono">
-                    {autoCalState.result.diagnostics.expectedCols}×
-                    {autoCalState.result.diagnostics.expectedRows}
-                  </span>
-                  ), RMS{" "}
-                  <span className="font-mono">
-                    {autoCalState.result.diagnostics.colsRms.toFixed(2)}/
-                    {autoCalState.result.diagnostics.rowsRms.toFixed(2)} px
-                  </span>
-                  , povjerenje{" "}
-                  <span className="font-mono font-semibold">
-                    {(autoCalState.result.confidence * 100).toFixed(0)}%
-                  </span>
-                </span>
+            {/* ═══ TWO-COLUMN MAIN AREA ═══ */}
+            <div className="flex gap-4 items-stretch">
+              {/* ───── LEFT: canvas + status banners ───── */}
+              <div className="flex-1 min-w-0 flex flex-col gap-2">
+                {autoCalState.kind === "success" && (
+                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-700 dark:text-emerald-400 animate-fade-in">
+                    <Sparkles className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span className="flex-1 truncate">
+                      Detektirano:{" "}
+                      <span className="font-mono font-semibold">
+                        {autoCalState.result.diagnostics.detectedCols}×
+                        {autoCalState.result.diagnostics.detectedRows}
+                      </span>{" "}
+                      linija, povjerenje{" "}
+                      <span className="font-mono font-semibold">
+                        {(autoCalState.result.confidence * 100).toFixed(0)}%
+                      </span>
+                    </span>
+                  </div>
+                )}
+                {autoCalState.kind === "fail" && (
+                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-700 dark:text-amber-400">
+                    <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span>{autoCalState.message}</span>
+                  </div>
+                )}
+                <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
+                  <MousePointerClick className="w-3 h-3" />
+                  Kliknite na sjecišta linija. Alt+klik pomicanje, scroll zoom.
+                </p>
+                <div
+                  className="bg-card border border-border/60 rounded-2xl overflow-hidden shadow-lg flex-1"
+                  style={{ height: "calc(100vh - 200px)" }}
+                >
+                  <OverlayCanvas
+                    config={config}
+                    imageUrl={imageUrl}
+                    mode="calibrate"
+                    calibrationPoints={calibrationPoints}
+                    onCalibrationPointAdd={handleCalibrationPointAdd}
+                    onCalibrationPointRemove={handleCalibrationPointRemove}
+                    dataPoints={dataPoints}
+                    onDataPointAdd={handleDataPointAdd}
+                    onDataPointRemove={handleDataPointRemove}
+                    maskUrl={maskUrl}
+                    maskOpacity={maskOpacity}
+                    affineMatrix={affineMatrix}
+                  />
+                </div>
               </div>
-            )}
-            {autoCalState.kind === "fail" && (
-              <div className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-700 dark:text-amber-400 animate-fade-in">
-                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
-                <span>{autoCalState.message}</span>
-              </div>
-            )}
 
-            {/* Advanced detection settings (collapsible) */}
-            <div className="mb-3">
-              <button
-                onClick={() => setSettingsOpen((v) => !v)}
-                className="flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-                type="button"
+              {/* ───── RIGHT: sidebar ───── */}
+              <aside
+                className="w-[360px] flex-shrink-0 flex flex-col gap-3 overflow-y-auto pr-1"
+                style={{ maxHeight: "calc(100vh - 100px)" }}
               >
-                <Settings2 className="w-3.5 h-3.5" />
-                Napredne postavke detekcije
-                <ChevronDown
-                  className={`w-3.5 h-3.5 transition-transform ${
-                    settingsOpen ? "rotate-180" : ""
-                  }`}
-                />
-              </button>
-              {settingsOpen && (
-                <div className="mt-2 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 p-4 rounded-xl bg-card border border-border/60 animate-fade-in">
-                  {(
-                    [
-                      ["minSaturation", "Min saturacija (zelena)", 0, 0.5, 0.01],
-                      ["minValue", "Min svjetlina", 0, 0.5, 0.01],
-                      ["maxValue", "Maks svjetlina", 0.5, 1, 0.01],
-                      [
-                        "greenDominance",
-                        "Zelena dominacija (G/max)",
-                        0.5,
-                        1,
-                        0.01,
-                      ],
-                      ["darkLineMaxV", "Tamne linije: maks v", 0, 0.6, 0.01],
-                      ["darkLineMaxS", "Tamne linije: maks s", 0, 0.6, 0.01],
-                      ["smoothRadius", "Zaglađivanje", 0, 5, 1],
-                      ["peakProminence", "Prominencija vrha", 1, 2, 0.05],
-                      ["minPeakSeparation", "Min razmak (px)", 1, 20, 1],
-                      ["maxRelativeRms", "Maks rel. RMS", 0.05, 0.6, 0.01],
-                    ] as const
-                  ).map(([key, label, min, max, step]) => (
-                    <div key={key} className="space-y-1">
-                      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                        <span>{label}</span>
-                        <span className="font-mono font-medium text-foreground">
-                          {Number.isInteger(step)
-                            ? detectionConfig[key].toFixed(0)
-                            : detectionConfig[key].toFixed(2)}
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min={min}
-                        max={max}
-                        step={step}
-                        value={detectionConfig[key]}
-                        onChange={(e) =>
-                          setDetectionConfig((c) => ({
-                            ...c,
-                            [key]: parseFloat(e.target.value),
-                          }))
-                        }
-                        className="w-full slider-emerald"
+                {/* Rectified preview */}
+                <div className="bg-card border border-border/60 rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-border/60 flex items-center justify-between">
+                    <span className="text-xs font-semibold">
+                      Pregled rektifikacije
+                    </span>
+                    {rectifiedLoading && (
+                      <span className="text-[10px] text-muted-foreground animate-pulse">
+                        učitavanje…
+                      </span>
+                    )}
+                  </div>
+                  <div className="bg-muted/30 flex items-center justify-center min-h-[120px]">
+                    {rectifiedUrl ? (
+                      <img
+                        src={rectifiedUrl}
+                        alt="Rektifikacija"
+                        className="max-w-full max-h-[200px] object-contain"
                       />
-                    </div>
-                  ))}
-                  <div className="md:col-span-2 lg:col-span-4 flex justify-end pt-1">
-                    <button
-                      onClick={() => setDetectionConfig(DETECTION_DEFAULTS)}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
-                      type="button"
-                    >
-                      Vrati zadane vrijednosti
-                    </button>
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground p-4 text-center">
+                        Postavi ≥3 kalibracijske točke za pregled
+                        rektifikacije.
+                      </p>
+                    )}
                   </div>
                 </div>
-              )}
-            </div>
 
-            <div
-              className="bg-card border border-border/60 rounded-2xl overflow-hidden shadow-lg"
-              style={{ height: "calc(100vh - 200px)" }}
-            >
-              <OverlayCanvas
-                config={config}
-                imageUrl={imageUrl}
-                mode="calibrate"
-                calibrationPoints={calibrationPoints}
-                onCalibrationPointAdd={handleCalibrationPointAdd}
-                onCalibrationPointRemove={handleCalibrationPointRemove}
-                dataPoints={dataPoints}
-                onDataPointAdd={handleDataPointAdd}
-                onDataPointRemove={handleDataPointRemove}
-                maskUrl={maskUrl}
-                maskOpacity={maskOpacity}
-                affineMatrix={affineMatrix}
-              />
+                {/* Mask opacity (always visible) */}
+                <div className="bg-card border border-border/60 rounded-xl px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <Eye className="w-3.5 h-3.5 text-muted-foreground" />
+                    <span className="text-xs text-muted-foreground flex-1">
+                      Pregled maske
+                    </span>
+                    <span className="text-[10px] font-mono text-muted-foreground">
+                      {Math.round(maskOpacity * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={maskOpacity}
+                    onChange={(e) =>
+                      setMaskOpacity(parseFloat(e.target.value))
+                    }
+                    className="w-full slider-emerald mt-1.5"
+                  />
+                </div>
+
+                {/* Rotation collapsible */}
+                <div className="bg-card border border-border/60 rounded-xl overflow-hidden">
+                  <button
+                    onClick={() => setShowRotation((v) => !v)}
+                    className="w-full px-3 py-2 flex items-center justify-between text-xs font-semibold hover:bg-muted/40 transition-colors"
+                    type="button"
+                  >
+                    <span className="flex items-center gap-2">
+                      <RotateCw className="w-3.5 h-3.5" />
+                      Rotacija slike
+                      {rotationAngle !== 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-primary/10 text-primary text-[10px] font-mono">
+                          {rotationAngle.toFixed(1)}°
+                        </span>
+                      )}
+                      {isRotating && (
+                        <span className="text-[10px] text-primary animate-pulse">
+                          rotira…
+                        </span>
+                      )}
+                    </span>
+                    <ChevronDown
+                      className={`w-3.5 h-3.5 transition-transform ${
+                        showRotation ? "rotate-180" : ""
+                      }`}
+                    />
+                  </button>
+                  {showRotation && (
+                    <div className="px-3 pb-3 space-y-2 border-t border-border/60 pt-3">
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => handleRotateBy(-90)}
+                          disabled={isRotating}
+                          className="flex-1 p-1.5 rounded-md bg-muted/40 hover:bg-muted text-foreground transition-colors disabled:opacity-40 flex items-center justify-center gap-1 text-[11px]"
+                          type="button"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          −90°
+                        </button>
+                        <button
+                          onClick={() => handleRotateBy(180)}
+                          disabled={isRotating}
+                          className="flex-1 p-1.5 rounded-md bg-muted/40 hover:bg-muted text-foreground transition-colors disabled:opacity-40 flex items-center justify-center gap-1 text-[11px]"
+                          type="button"
+                        >
+                          <FlipVertical className="w-3.5 h-3.5" />
+                          180°
+                        </button>
+                        <button
+                          onClick={() => handleRotateBy(90)}
+                          disabled={isRotating}
+                          className="flex-1 p-1.5 rounded-md bg-muted/40 hover:bg-muted text-foreground transition-colors disabled:opacity-40 flex items-center justify-center gap-1 text-[11px]"
+                          type="button"
+                        >
+                          <RotateCw className="w-3.5 h-3.5" />
+                          +90°
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-muted-foreground w-8">
+                          Kut
+                        </span>
+                        <input
+                          type="range"
+                          min={-180}
+                          max={180}
+                          step={0.05}
+                          value={rotationAngle}
+                          onChange={(e) =>
+                            setRotationAngle(parseFloat(e.target.value))
+                          }
+                          className="flex-1 slider-emerald"
+                        />
+                        <input
+                          type="number"
+                          min={-180}
+                          max={180}
+                          step={0.01}
+                          value={rotationAngle.toFixed(2)}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            if (!Number.isNaN(v)) setRotationAngle(v);
+                          }}
+                          className="w-14 bg-muted/40 border border-border rounded px-1 py-0.5 text-[10px] font-mono text-right focus:outline-none"
+                        />
+                        <button
+                          onClick={() => setRotationAngle(0)}
+                          className="text-[10px] text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-muted"
+                          type="button"
+                        >
+                          0°
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Detection params collapsible */}
+                <div className="bg-card border border-border/60 rounded-xl overflow-hidden">
+                  <button
+                    onClick={() => setShowDetectionParams((v) => !v)}
+                    className="w-full px-3 py-2 flex items-center justify-between text-xs font-semibold hover:bg-muted/40 transition-colors"
+                    type="button"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Settings2 className="w-3.5 h-3.5" />
+                      Postavke detekcije
+                    </span>
+                    <ChevronDown
+                      className={`w-3.5 h-3.5 transition-transform ${
+                        showDetectionParams ? "rotate-180" : ""
+                      }`}
+                    />
+                  </button>
+                  {showDetectionParams && (
+                    <div className="px-3 pb-3 space-y-2 border-t border-border/60 pt-3">
+                      {(
+                        [
+                          ["minSaturation", "Min saturacija", 0, 0.5, 0.01],
+                          ["minValue", "Min svjetlina", 0, 0.5, 0.01],
+                          ["maxValue", "Maks svjetlina", 0.5, 1, 0.01],
+                          ["greenDominance", "Zelena G/max", 0.5, 1, 0.01],
+                          ["darkLineMaxV", "Tamne linije v", 0, 0.6, 0.01],
+                          ["darkLineMaxS", "Tamne linije s", 0, 0.6, 0.01],
+                          ["smoothRadius", "Zaglađivanje", 0, 5, 1],
+                          ["peakProminence", "Prominencija", 1, 2, 0.05],
+                          ["minPeakSeparation", "Min razmak", 1, 20, 1],
+                          ["maxRelativeRms", "Maks rel. RMS", 0.05, 0.6, 0.01],
+                        ] as const
+                      ).map(([key, label, min, max, step]) => (
+                        <div key={key} className="space-y-0.5">
+                          <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                            <span>{label}</span>
+                            <span className="font-mono font-medium text-foreground">
+                              {Number.isInteger(step)
+                                ? detectionConfig[key].toFixed(0)
+                                : detectionConfig[key].toFixed(2)}
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={min}
+                            max={max}
+                            step={step}
+                            value={detectionConfig[key]}
+                            onChange={(e) =>
+                              setDetectionConfig((c) => ({
+                                ...c,
+                                [key]: parseFloat(e.target.value),
+                              }))
+                            }
+                            className="w-full slider-emerald"
+                          />
+                        </div>
+                      ))}
+                      <button
+                        onClick={() => setDetectionConfig(DETECTION_DEFAULTS)}
+                        className="w-full mt-2 px-3 py-1.5 rounded-lg text-[10px] font-medium text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted transition-all"
+                        type="button"
+                      >
+                        Vrati zadane vrijednosti
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Activity log collapsible */}
+                <div className="bg-card border border-border/60 rounded-xl overflow-hidden">
+                  <button
+                    onClick={() => setShowLog((v) => !v)}
+                    className="w-full px-3 py-2 flex items-center justify-between text-xs font-semibold hover:bg-muted/40 transition-colors"
+                    type="button"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Layers className="w-3.5 h-3.5" />
+                      Log aktivnosti
+                      <span className="px-1.5 py-0.5 rounded bg-muted text-[10px] font-mono text-muted-foreground">
+                        {logs.length}
+                      </span>
+                    </span>
+                    <ChevronDown
+                      className={`w-3.5 h-3.5 transition-transform ${
+                        showLog ? "rotate-180" : ""
+                      }`}
+                    />
+                  </button>
+                  {showLog && (
+                    <div className="border-t border-border/60 max-h-[260px] overflow-y-auto">
+                      {logs.length === 0 ? (
+                        <p className="text-[10px] text-muted-foreground p-3 text-center">
+                          Pokrenite auto-kalibraciju za prikaz aktivnosti.
+                        </p>
+                      ) : (
+                        <ul className="divide-y divide-border/40">
+                          {logs.map((entry, i) => (
+                            <li
+                              key={`${entry.t}-${i}`}
+                              className="px-3 py-1.5 flex items-start gap-2 text-[10px]"
+                            >
+                              <span
+                                className={`mt-0.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                                  entry.kind === "success"
+                                    ? "bg-emerald-500"
+                                    : entry.kind === "warn"
+                                    ? "bg-amber-500"
+                                    : entry.kind === "error"
+                                    ? "bg-rose-500"
+                                    : "bg-muted-foreground/50"
+                                }`}
+                              />
+                              <span className="font-mono text-muted-foreground tabular-nums">
+                                {new Date(entry.t).toLocaleTimeString("hr-HR", {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                  second: "2-digit",
+                                })}
+                              </span>
+                              <span
+                                className={`flex-1 break-words ${
+                                  entry.kind === "error"
+                                    ? "text-rose-600 dark:text-rose-400"
+                                    : entry.kind === "warn"
+                                    ? "text-amber-600 dark:text-amber-400"
+                                    : "text-foreground"
+                                }`}
+                              >
+                                {entry.text}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {logs.length > 0 && (
+                        <div className="border-t border-border/60 px-3 py-1.5 flex justify-end">
+                          <button
+                            onClick={() => setLogs([])}
+                            className="text-[10px] text-muted-foreground hover:text-foreground"
+                            type="button"
+                          >
+                            Očisti
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </aside>
             </div>
           </div>
         )}
+
+        {/* OLD calibrate UI removed below */}
 
         {/* ═══ STEP 4: DIGITIZE ═══ */}
         {step === "digitize" && config && imageUrl && (

@@ -8,6 +8,9 @@ from .calibrate import (
     CalibrateGridRequest,
     CalibrateGridResponse,
     calibrate_grid,
+    RectifyRequest,
+    RectifyResponse,
+    rectify,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -42,6 +45,17 @@ def extract_trace_endpoint(
     except Exception as e:  # pragma: no cover
         log.error("extract-trace failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(500, f"Extraction failed: {e}")
+
+
+@app.post("/api/rectify", response_model=RectifyResponse)
+def rectify_endpoint(req: RectifyRequest):
+    try:
+        return rectify(req)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # pragma: no cover
+        log.error("rectify failed: %s\n%s", e, traceback.format_exc())
+        raise HTTPException(500, f"Rectify failed: {e}")
 
 
 @app.post("/api/calibrate-grid", response_model=CalibrateGridResponse)

@@ -177,6 +177,80 @@ def _intersect(line1: tuple[float, float, float], line2: tuple[float, float, flo
     return x, y
 
 
+class RectifyRequest(BaseModel):
+    imageBase64: str
+    config: ChartConfig
+    calibrationPoints: List[CalibrationPoint]
+    displayWidth: float
+    displayHeight: float
+    # Output dimensions for the rectified preview (kept small for fast UI).
+    previewMaxEdge: int = 800
+
+
+class RectifyResponse(BaseModel):
+    rectifiedBase64: str
+    width: int
+    height: int
+
+
+def rectify(req: RectifyRequest) -> RectifyResponse:
+    """Warp the input image to a rectified (axis-aligned chart-mm) preview.
+
+    Used by the frontend to show a thumbnail of "what the chart looks like
+    if we trust the current calibration corners". A correct calibration
+    yields a perfectly rectangular grid; a wrong one leaves visible skew.
+    """
+    from .geometry import compute_affine, affine_to_3x3
+
+    img = _decode(req.imageBase64)
+    nat_h, nat_w = img.shape[:2]
+
+    # Scale calibration corners from display-px to natural-px
+    sx = nat_w / req.displayWidth
+    sy = nat_h / req.displayHeight
+    nat_cal = [
+        type(p)(
+            imgX=p.imgX * sx, imgY=p.imgY * sy,
+            chartX=p.chartX, chartY=p.chartY,
+        )
+        for p in req.calibrationPoints
+    ]
+    M_aff = compute_affine(nat_cal)
+    H = affine_to_3x3(M_aff)
+
+    # Choose a preview resolution that's small enough for fast roundtrip but
+    # readable. Cap longest edge at previewMaxEdge.
+    cw, ch = req.config.chartWidth, req.config.chartHeight
+    longest = max(cw, ch)
+    px_per_mm = req.previewMaxEdge / longest
+    out_w = int(round(cw * px_per_mm))
+    out_h = int(round(ch * px_per_mm))
+    scale = np.array(
+        [[px_per_mm, 0.0, 0.0],
+         [0.0, px_per_mm, 0.0],
+         [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    full_H = scale @ H
+
+    rectified = cv2.warpPerspective(
+        img,
+        full_H,
+        (out_w, out_h),
+        flags=cv2.INTER_AREA,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    ok, buf = cv2.imencode(".png", rectified, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+    if not ok:
+        raise ValueError("Could not encode rectified preview")
+    return RectifyResponse(
+        rectifiedBase64=base64.b64encode(buf.tobytes()).decode(),
+        width=out_w,
+        height=out_h,
+    )
+
+
 def calibrate_grid(req: CalibrateGridRequest, debug: bool = False) -> CalibrateGridResponse:
     timing: dict[str, float] = {}
 

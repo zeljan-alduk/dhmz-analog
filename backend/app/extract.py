@@ -14,6 +14,7 @@ Pipeline (rewritten per user feedback):
      then interpolate to produce DENSE samples — visually a continuous line.
 """
 import base64
+import os
 import time
 from io import BytesIO
 from typing import Optional
@@ -21,6 +22,45 @@ from typing import Optional
 import cv2
 import numpy as np
 from PIL import Image
+
+
+# ─── Bundled template loading ─────────────────────────────────────────────
+# Pre-loaded EMPTY reference scans, one per chart type. Used as the default
+# template for /api/extract-trace when the caller doesn't supply one. Loaded
+# once at module import to avoid the 60 MB decode per request.
+_TEMPLATE_DIR = os.environ.get("DHMZ_TEMPLATE_DIR", "/app/templates")
+_TEMPLATE_MAX_EDGE = 4000
+_TEMPLATES: dict[str, np.ndarray] = {}
+
+
+def _load_bundled_templates() -> None:
+    """Read /app/templates/<chart-type>.png and cache resized BGR arrays."""
+    if not os.path.isdir(_TEMPLATE_DIR):
+        return
+    for chart_type in ("barograph", "hygrograph", "thermograph"):
+        path = os.path.join(_TEMPLATE_DIR, f"{chart_type}.png")
+        if not os.path.exists(path):
+            continue
+        try:
+            arr = cv2.imread(path, cv2.IMREAD_COLOR)
+            if arr is None:
+                continue
+            h, w = arr.shape[:2]
+            longest = max(h, w)
+            if longest > _TEMPLATE_MAX_EDGE:
+                scale = _TEMPLATE_MAX_EDGE / longest
+                arr = cv2.resize(
+                    arr,
+                    (int(round(w * scale)), int(round(h * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            _TEMPLATES[chart_type] = arr
+            print(f"[template] loaded {chart_type}: {arr.shape}")
+        except Exception as e:
+            print(f"[template] failed to load {path}: {e}")
+
+
+_load_bundled_templates()
 
 from .schemas import (
     ExtractTraceRequest,
@@ -44,6 +84,101 @@ def _decode_image(b64: str) -> np.ndarray:
     img = Image.open(BytesIO(raw)).convert("RGB")
     arr = np.array(img)
     return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+
+def _align_template(
+    img_bgr: np.ndarray, template_bgr: np.ndarray
+) -> Optional[np.ndarray]:
+    """Align template to image via ECC. Returns the warped template, or None
+    if alignment fails. Uses MOTION_AFFINE which handles small rotation +
+    scaling + translation — typical scanner-to-scanner variation.
+    """
+    h, w = img_bgr.shape[:2]
+    # Match template size to input image (rough scale + bilinear)
+    template_resized = cv2.resize(template_bgr, (w, h), interpolation=cv2.INTER_AREA)
+
+    img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    tmpl_gray = cv2.cvtColor(template_resized, cv2.COLOR_BGR2GRAY)
+
+    # ECC needs float32, normalized
+    img_f = img_gray.astype(np.float32) / 255.0
+    tmpl_f = tmpl_gray.astype(np.float32) / 255.0
+
+    warp = np.eye(2, 3, dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 1e-4)
+    try:
+        cc, warp = cv2.findTransformECC(
+            templateImage=img_f,
+            inputImage=tmpl_f,
+            warpMatrix=warp,
+            motionType=cv2.MOTION_AFFINE,
+            criteria=criteria,
+            inputMask=None,
+            gaussFiltSize=5,
+        )
+        aligned = cv2.warpAffine(
+            template_resized,
+            warp,
+            (w, h),
+            flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255),
+        )
+        return aligned
+    except cv2.error:
+        return None
+
+
+def _trace_mask_from_residual(
+    img_bgr: np.ndarray, template_bgr: np.ndarray
+) -> np.ndarray:
+    """Subtract template from input → residual mask of trace pixels.
+
+    Pre: template is the SAME chart type but EMPTY (no pen). Both arrays
+    are already in (rectified, chart-mm) coordinates because the caller
+    warped/resized to (out_w, out_h). We try ECC fine-alignment first; if
+    it fails (often does on charts with strong ink that throws off the
+    least-squares), we fall back to direct subtraction with a stricter
+    threshold (any anti-aliased ghost residual gets cleaned by morphology).
+    """
+    template_resized = template_bgr  # already at output size
+    if template_resized.shape != img_bgr.shape:
+        template_resized = cv2.resize(
+            template_bgr,
+            (img_bgr.shape[1], img_bgr.shape[0]),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    aligned = _align_template(img_bgr, template_resized)
+    if aligned is None:
+        # ECC failed → use template as-is. Both images are already in the
+        # rectified chart-mm coordinate system, so they're approximately
+        # aligned. Bump the residual threshold to absorb any small
+        # registration offset.
+        aligned = template_resized
+        residual_threshold = 35
+    else:
+        residual_threshold = 25
+
+    img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.int16)
+    tmpl_gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY).astype(np.int16)
+    residual = tmpl_gray - img_gray  # positive where input is darker than template
+    mask = (residual > residual_threshold).astype(np.uint8) * 255
+
+    # Even after ECC, the residual contains "ghost" grid pixels where the
+    # template and image grids didn't align to the pixel. Remove anything
+    # that's GREEN in the input image — that's grid ink (paper trace ink is
+    # blue/red/black/brown, never green).
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    H_ch, S_ch = hsv[:, :, 0], hsv[:, :, 1]
+    is_green = (H_ch >= 30) & (H_ch <= 100) & (S_ch > 20)
+    mask[is_green] = 0
+
+    # Tiny morph close to bridge 1-2 px gaps; open to drop salt noise
+    kernel3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel3)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel3)
+    return mask
 
 
 def _build_trace_mask(rectified_bgr: np.ndarray, ink_hint: str) -> np.ndarray:
@@ -159,8 +294,58 @@ def extract_trace(req: ExtractTraceRequest, debug: bool = False) -> ExtractTrace
     )
     timing["warp"] = (time.perf_counter() - t0) * 1000
 
-    t0 = time.perf_counter()
-    mask = _build_trace_mask(rectified, req.traceInk)
+    # Template subtraction path: if the request includes a prazna template OR
+    # there's a bundled reference template for this chart type, align it via
+    # ECC and subtract → residual contains only added ink (the pen trace).
+    # Same chart, different scan: ECC handles small rotation/scale variance.
+    template_used = False
+    template_bgr: Optional[np.ndarray] = None
+    if req.templateImageBase64:
+        try:
+            template_bgr = _decode_image(req.templateImageBase64)
+        except Exception as e:
+            print(f"template decode failed: {e}")
+    elif req.config.orientation in ("landscape", "portrait"):
+        # Use bundled template by chart-type heuristic. orientation alone
+        # doesn't pin the type, so go by value range too.
+        chart_key = None
+        if req.config.minValue >= 900 and req.config.maxValue <= 1100:
+            chart_key = "barograph"
+        elif req.config.minValue >= -50 and req.config.maxValue <= 50:
+            chart_key = "thermograph"
+        elif req.config.minValue >= 0 and req.config.maxValue <= 100:
+            chart_key = "hygrograph"
+        if chart_key in _TEMPLATES:
+            template_bgr = _TEMPLATES[chart_key]
+
+    if template_bgr is not None:
+        try:
+            t_tmpl = time.perf_counter()
+            # The bundled template is a canonical empty-chart scan in its
+            # natural orientation (≈ chart aspect). Direct resize to the
+            # rectified output size — ECC will fine-tune pixel-level
+            # alignment with the user's rectified image.
+            tmpl_resized = cv2.resize(
+                template_bgr, (out_w, out_h), interpolation=cv2.INTER_AREA
+            )
+            template_mask = _trace_mask_from_residual(rectified, tmpl_resized)
+            timing["template_align"] = (time.perf_counter() - t_tmpl) * 1000
+            if template_mask is None:
+                print("[template] _trace_mask_from_residual returned None (ECC failed?)")
+            else:
+                pix = int(np.sum(template_mask > 0))
+                print(f"[template] residual mask: {pix} px")
+                if pix >= 100:
+                    mask = template_mask
+                    timing["mask"] = 0.0
+                    template_used = True
+        except Exception as e:
+            print(f"[template] path failed: {e}")
+
+    if not template_used:
+        t0 = time.perf_counter()
+        mask = _build_trace_mask(rectified, req.traceInk)
+        timing["mask"] = (time.perf_counter() - t0) * 1000
 
     # Active chart interior: clip the top/bottom margins on the value axis
     # and a small bit on the time axis. Day/date labels live in those bands.

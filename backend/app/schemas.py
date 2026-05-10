@@ -39,6 +39,12 @@ class ExtractTraceRequest(BaseModel):
     samplesPerDay: int = 48
     # Trace ink color hint — affects masking. "auto" uses generic dark+saturated.
     traceInk: Literal["auto", "blue", "red", "black"] = "auto"
+    # Optional template (prazna / empty chart of the same instrument). When
+    # provided, the extractor aligns the input image to this template via ECC
+    # then subtracts → the residual contains ONLY the pen trace (grid, labels,
+    # logo, paper texture all cancel out). This is the gold-standard trace
+    # extraction technique used by Met Office / KNMI digitization pipelines.
+    templateImageBase64: Optional[str] = None
 
 
 class DataPoint(BaseModel):

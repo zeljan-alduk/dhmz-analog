@@ -7,6 +7,10 @@ services:
     # container (no rebuild needed) to pick up changes.
     volumes:
       - ./app:/app/app:ro
+      # Bundled chart-type reference templates (empty / prazna scans). Used
+      # by /api/extract-trace as the default template when the request
+      # doesn't include one.
+      - ./templates:/app/templates:ro
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
     networks:
       - edge
