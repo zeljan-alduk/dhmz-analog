@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dhmz-session-mcp"
+version = "0.1.0"
+description = "MCP server for the DHMZ analog chart digitizer session API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "DHMZ analog digitizer" }]
+dependencies = [
+    "mcp[cli]>=1.2.0",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+dhmz-session-mcp = "dhmz_session_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dhmz_session_mcp"]
