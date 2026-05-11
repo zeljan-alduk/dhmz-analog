@@ -1703,9 +1703,9 @@ see you working — not silence followed by a wall of text.
 
 **On connect (very first thing, no permission ask):**
 
-1. Post `{"text":"spojen, gledam sken","kind":"reply"}` to
+1. Post `{{"text":"spojen, gledam sken","kind":"reply"}}` to
    `/chat-claude`. One-liner so the user sees activity in <1 s.
-2. In parallel: read `/context`, `/sessions/{id}`, and a downsampled
+2. In parallel: read `/context`, `/sessions/{{id}}`, and a downsampled
    `/image` (max ~1200 px).
 3. Post a 1-2 sentence summary of what you see (chart type,
    dimensions, anything notable). Still `kind="reply"`.
