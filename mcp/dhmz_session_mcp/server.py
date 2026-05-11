@@ -35,6 +35,18 @@ DEFAULT_BASE_URL = "https://dhmz.aldo.tech/api"
 BASE_URL = os.environ.get("DHMZ_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 DEFAULT_SESSION = os.environ.get("DHMZ_SESSION_ID", "").strip() or None
 LONG_TIMEOUT = float(os.environ.get("DHMZ_HTTP_TIMEOUT", "120"))
+# Display name surfaced in the session web chat for every `post_chat`.
+# The env var is just a default — the agent is expected to self-tag with
+# brand + version on its first post_chat (e.g. "Claude Opus 4.7",
+# "Codex 5.4", "GPT-5"). That value sticks for subsequent calls so the
+# chat label stays stable for the whole conversation.
+_AGENT_STATE: dict[str, str] = {
+    "name": os.environ.get("DHMZ_AGENT_NAME", "").strip() or "claude",
+}
+
+
+def _agent_label() -> str:
+    return _AGENT_STATE["name"]
 
 log = logging.getLogger("dhmz_session_mcp")
 
@@ -613,6 +625,7 @@ def add_note(
 def post_chat(
     text: str,
     kind: Literal["reply", "thinking"] = "reply",
+    agent: Optional[str] = None,
     images: Optional[list[str]] = None,
     session_id: Optional[str] = None,
 ) -> dict:
@@ -637,12 +650,24 @@ def post_chat(
         short `kind="thinking"` saying what you learned / what's next.
       - Skip trivial chains (back-to-back state reads, poll_chat polls).
 
+    **Identity tag — include on EVERY post_chat.** The chat is
+    model-agnostic; multiple agents may take turns within one session.
+    Set `agent` to your real brand + version on *every* call (not just
+    the first one). Example values: `"Claude Opus 4.7"`, `"Codex 5.4"`,
+    `"GPT-5"`, `"Gemini 2.5 Pro"`. If you omit it the server falls back
+    to the last known label, but don't rely on that — be explicit.
+
     Args:
       text: ≤4000 chars. For long-running pipeline calls, prefix with
         `"⏳ Vrtim: X (~Xs)"` so the user sees the spinner-equivalent.
+      agent: REQUIRED in spirit — your brand + version. See above.
       images: optional ≤4 attachments — filesystem paths or base64 strings.
     """
-    body: dict[str, Any] = {"text": text, "kind": kind}
+    if agent:
+        clean = agent.strip()
+        if clean:
+            _AGENT_STATE["name"] = clean
+    body: dict[str, Any] = {"text": text, "kind": kind, "agent": _agent_label()}
     if images:
         b64s = []
         for src in images:
@@ -687,8 +712,8 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     log.info(
-        "starting dhmz-session-mcp base=%s default_sid=%s",
-        BASE_URL, DEFAULT_SESSION or "(none)",
+        "starting dhmz-session-mcp base=%s default_sid=%s agent=%s",
+        BASE_URL, DEFAULT_SESSION or "(none)", _agent_label(),
     )
     mcp.run()  # stdio transport
 

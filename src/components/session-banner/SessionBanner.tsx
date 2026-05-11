@@ -31,7 +31,13 @@ export function SessionBanner({
 
 KORAK 1 — BRZI HANDSHAKE (bez "smijem li" pitanja, paste URL-a je
 autorizacija za read i chat):
-1) POST /chat-claude "spojen, gledam sken" — odmah, da vidim da si tu.
+1) POST /chat-claude — predstavi se s imenom + verzijom. CHAT JE
+   MODEL-AGNOSTIC: na SVAKOJ poruci pošalji \`"agent":"<brand> <verzija>"\`
+   (npr. "Claude Opus 4.7", "GPT-5", itd.). Prva poruka uključi i u
+   tekstu, dalje samo u polju. Primjer prve:
+   {"text":"Bok, ja sam Claude Opus 4.7, spojen, gledam sken",
+    "agent":"Claude Opus 4.7"}. Bez generic "AI asistent" — pravo
+   ime + verzija.
 2) Paralelno: GET /context, GET /api/sessions/<sid>, GET image
    (downsampled, ~1200 px).
 3) U chat 1-2 rečenice: chart-type, dimenzije, prva opažanja.
@@ -104,7 +110,14 @@ Spojen si preko \`dhmz\` MCP servera — koristi te toolove, ne curl.
 
 KORAK 1 — BRZI HANDSHAKE (bez "smijem li" pitanja, paste URL-a je
 autorizacija za read i chat):
-1) \`post_chat("spojen, gledam sken")\` — odmah, da vidim da si tu.
+1) \`post_chat\` — predstavi se s imenom + verzijom u poruci I u
+   \`agent\` polju. CHAT JE MODEL-AGNOSTIC: \`agent\` polje pošalji u
+   SVAKU sljedeću \`post_chat\` (chat bubble label se vodi po njemu, a
+   više modela može dijeliti sesiju). Prva poruka uključi i u tekstu;
+   dalje samo polje. Primjer:
+   \`post_chat(text="Bok, ja sam Claude Opus 4.7, spojen, gledam sken",
+              agent="Claude Opus 4.7")\`. Bez "AI asistent" — pravo
+   ime + verzija.
 2) Paralelno: \`get_briefing()\`, \`get_state()\`, \`get_image(max_edge=1200)\`.
 3) U \`post_chat\` 1-2 rečenice: chart-type, dimenzije, prva opažanja.
 
@@ -189,7 +202,14 @@ Toolove imaš kao \`mcp__dhmz__*\`. Ne curl — sve preko MCP-a.
 
 KORAK 1 — BRZI HANDSHAKE (bez "smijem li" pitanja, paste URL-a je
 autorizacija za read i chat):
-1) \`post_chat("spojen, gledam sken")\` — odmah, da vidim da si tu.
+1) \`post_chat\` — predstavi se s imenom + verzijom u poruci I u
+   \`agent\` polju. CHAT JE MODEL-AGNOSTIC: \`agent\` polje pošalji u
+   SVAKU sljedeću \`post_chat\` (chat bubble label se vodi po njemu, a
+   više modela može dijeliti sesiju). Prva poruka uključi i u tekstu;
+   dalje samo polje. Primjer:
+   \`post_chat(text="Bok, ja sam Codex 5.4, spojen, gledam sken",
+              agent="Codex 5.4")\`. Brand + verzija; bez generic
+   "AI asistent".
 2) Paralelno: \`get_briefing()\`, \`get_state()\`, \`get_image(max_edge=1200)\`.
 3) U \`post_chat\` 1-2 rečenice: chart-type, dimenzije, prva opažanja.
 

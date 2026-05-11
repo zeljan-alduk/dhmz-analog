@@ -113,6 +113,11 @@ class ChatMessage:
     #               collapses after a short preview. Use for "why I chose X
     #               over Y" without cluttering the user-facing transcript.
     kind: Literal["reply", "thinking"] = "reply"
+    # Display identity of the *agent* side. None / "claude" both render
+    # as "Claude"; "codex" / "gpt" / "other-llm" let alternate operators
+    # show their own brand in the chat. Set by the MCP server via the
+    # `DHMZ_AGENT_NAME` env var, threaded through ChatPostIn.agent.
+    agent: Optional[str] = None
 
 
 @dataclass
@@ -526,6 +531,7 @@ def _serialize_session_for_disk(s: "Session") -> dict:
                 "by": m.by,
                 "text": m.text,
                 "kind": m.kind,
+                "agent": m.agent,
                 "attachments": [
                     {"id": a.id, "mime": a.mime, "width": a.width, "height": a.height}
                     for a in m.attachments
@@ -635,6 +641,7 @@ def _load_session_from_disk(d: _FsPath) -> Optional["Session"]:
                 ts=float(m["ts"]), by=m["by"], text=m["text"],
                 attachments=atts,
                 kind=m.get("kind", "reply"),
+                agent=m.get("agent"),
             ))
         s.chat_messages = chat_msgs
         return s
@@ -783,6 +790,7 @@ def _serialize_chat_message(s: Session, m: ChatMessage) -> dict:
         "by": m.by,
         "text": m.text,
         "kind": m.kind,
+        "agent": m.agent,
         "attachments": [
             {
                 "id": a.id,
@@ -1497,6 +1505,10 @@ class ChatPostIn(BaseModel):
     #              collapsed-by-default in the browser so it doesn't clutter
     #              the user-facing transcript. Use for "why I chose X".
     kind: Literal["reply", "thinking"] = "reply"
+    # Display identity for the agent — "claude" (default), "codex", "gpt",
+    # whatever the operator self-reports. Anything else is stored verbatim
+    # and surfaced in the browser bubble label.
+    agent: Optional[str] = None
 
 
 def _append_chat_message(
@@ -1514,6 +1526,7 @@ def _append_chat_message(
         ts=time.time(), by=by, text=text,
         attachments=attachments,
         kind=body.kind or "reply",
+        agent=(body.agent.strip() if body.agent else None) or None,
     )
     s.chat_messages.append(msg)
     return len(s.chat_messages) - 1
@@ -1703,12 +1716,24 @@ see you working — not silence followed by a wall of text.
 
 **On connect (very first thing, no permission ask):**
 
-1. Post `{{"text":"spojen, gledam sken","kind":"reply"}}` to
-   `/chat-claude`. One-liner so the user sees activity in <1 s.
+1. **Introduce yourself + tag every message.** This chat is
+   model-agnostic — multiple agents (Claude, Codex, GPT, Gemini, …)
+   may take turns within one session. Every `post_chat` must carry
+   `agent=<your real brand + version>` so the user knows which model
+   is speaking on each line. Examples: `"Claude Opus 4.7"`,
+   `"Codex 5.4"`, `"GPT-5"`, `"Gemini 2.5 Pro"`. No generic "AI
+   assistant" — use real names + versions.
+
+   First message also names yourself in the text, e.g.:
+   `{{"text":"Bok, ja sam Claude Opus 4.7, spojen, gledam sken",
+    "agent":"Claude Opus 4.7","kind":"reply"}}`. After that, you
+   don't repeat your name *in the text* of every reply — but
+   ALWAYS pass `agent` (the bubble label depends on it).
 2. In parallel: read `/context`, `/sessions/{{id}}`, and a downsampled
    `/image` (max ~1200 px).
 3. Post a 1-2 sentence summary of what you see (chart type,
-   dimensions, anything notable). Still `kind="reply"`.
+   dimensions, anything notable). Still `kind="reply"`, still with
+   `agent=...`.
 
 **On every user request (or when you decide to act):**
 

@@ -68,6 +68,9 @@ type SessionChatMessage = {
    *  preview that expands on click. Older messages may omit this — treat
    *  as "reply" by default. */
   kind?: "reply" | "thinking";
+  /** Display identity of the agent side: "claude" (default), "codex", or
+   *  any other string the operator self-reports via DHMZ_AGENT_NAME. */
+  agent?: string | null;
   attachments?: SessionChatAttachment[];
 };
 
@@ -1405,6 +1408,66 @@ function MarkdownText({ text, dark }: { text: string; dark: boolean }) {
   );
 }
 
+/**
+ * Map an agent identifier (e.g. "Codex 5.4", "Claude Opus 4.7", "GPT-5",
+ * or just "Claude") to the strings + colours we render. The full string
+ * is shown verbatim as the bubble label so the user knows exactly which
+ * model + version is talking; we sniff the first token to pick a colour
+ * accent. Unknown brands still render with a sane fallback.
+ */
+function agentIdentity(agent: string | null | undefined): {
+  label: string;
+  initial: string;
+  avatarClass: string;
+  nameClass: string;
+} {
+  const raw = (agent ?? "").trim();
+  const brand = raw.split(/\s+/)[0].toLowerCase();
+  const label = raw || "Claude";
+  const initial = (label[0] || "?").toUpperCase();
+  switch (brand) {
+    case "":
+    case "claude":
+      return {
+        label,
+        initial,
+        avatarClass: "bg-gradient-to-br from-purple-500 to-fuchsia-500 text-white",
+        nameClass: "text-purple-700",
+      };
+    case "codex":
+      return {
+        label,
+        initial,
+        avatarClass: "bg-gradient-to-br from-emerald-500 to-teal-500 text-white",
+        nameClass: "text-emerald-700",
+      };
+    case "gpt":
+    case "openai":
+    case "gpt-5":
+    case "gpt-4":
+      return {
+        label,
+        initial,
+        avatarClass: "bg-gradient-to-br from-cyan-500 to-sky-500 text-white",
+        nameClass: "text-sky-700",
+      };
+    case "gemini":
+      return {
+        label,
+        initial,
+        avatarClass: "bg-gradient-to-br from-blue-500 to-indigo-500 text-white",
+        nameClass: "text-indigo-700",
+      };
+    default:
+      return {
+        label,
+        initial,
+        avatarClass: "bg-gradient-to-br from-amber-500 to-orange-500 text-white",
+        nameClass: "text-amber-700",
+      };
+  }
+}
+
 function fmtChatTime(ts: number): string {
   const d = new Date(ts * 1000);
   const now = new Date();
@@ -1425,8 +1488,9 @@ function ChatBubble({ m }: { m: SessionChatMessage }) {
   const isUser = m.by === "user";
   const isClaude = m.by === "claude";
   const isThinking = m.kind === "thinking";
-  const senderLabel = isUser ? "You" : isClaude ? "Claude" : "System";
-  const initial = isUser ? "U" : isClaude ? "C" : "S";
+  const ident = agentIdentity(m.agent);
+  const senderLabel = isUser ? "You" : isClaude ? ident.label : "System";
+  const initial = isUser ? "U" : isClaude ? ident.initial : "S";
 
   // Thinking-mode: render as a dimmed/italic collapsible row instead of a
   // full bubble, so reasoning doesn't crowd the user-facing transcript.
@@ -1444,11 +1508,11 @@ function ChatBubble({ m }: { m: SessionChatMessage }) {
       >
         <div
           className={cn(
-            "shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold tracking-wide",
+            "shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold tracking-wide shadow-sm",
             isUser
-              ? "bg-blue-500 text-white shadow-sm"
+              ? "bg-blue-500 text-white"
               : isClaude
-              ? "bg-gradient-to-br from-purple-500 to-fuchsia-500 text-white shadow-sm"
+              ? ident.avatarClass
               : "bg-neutral-300 text-neutral-700"
           )}
           aria-hidden
@@ -1473,7 +1537,7 @@ function ChatBubble({ m }: { m: SessionChatMessage }) {
                 isUser
                   ? "text-blue-700"
                   : isClaude
-                  ? "text-purple-700"
+                  ? ident.nameClass
                   : "text-neutral-600"
               )}
             >
@@ -1579,6 +1643,7 @@ function NotesSection({ notes }: { notes: SessionNote[] }) {
  */
 function ThinkingRow({ m }: { m: SessionChatMessage }) {
   const [open, setOpen] = useState(false);
+  const ident = agentIdentity(m.agent);
   const firstLine = (m.text.split("\n").find((l) => l.trim()) ?? m.text).trim();
   const preview =
     firstLine.length > 100 ? firstLine.slice(0, 100) + "…" : firstLine;
@@ -1587,7 +1652,7 @@ function ThinkingRow({ m }: { m: SessionChatMessage }) {
       <span
         aria-hidden
         className="shrink-0 w-5 h-5 rounded-full bg-neutral-100 border border-neutral-200 flex items-center justify-center not-italic text-[10px]"
-        title="thinking"
+        title={`${ident.label} thinking`}
       >
         💭
       </span>
@@ -1598,6 +1663,14 @@ function ThinkingRow({ m }: { m: SessionChatMessage }) {
       >
         {open ? (
           <div className="whitespace-pre-wrap break-words leading-relaxed">
+            <div
+              className={cn(
+                "text-[10px] font-semibold tracking-wide not-italic mb-0.5",
+                ident.nameClass
+              )}
+            >
+              {ident.label}
+            </div>
             <MarkdownText text={m.text} dark={false} />
             <div className="text-[10px] text-neutral-400 not-italic mt-1">
               {fmtChatTime(m.ts)} · click to collapse
@@ -1605,6 +1678,14 @@ function ThinkingRow({ m }: { m: SessionChatMessage }) {
           </div>
         ) : (
           <div className="truncate flex items-center gap-2">
+            <span
+              className={cn(
+                "shrink-0 text-[10px] font-semibold tracking-wide not-italic",
+                ident.nameClass
+              )}
+            >
+              {ident.label}
+            </span>
             <span className="truncate">{preview}</span>
             <span className="text-[10px] text-neutral-400 not-italic shrink-0">
               {fmtChatTime(m.ts)}
