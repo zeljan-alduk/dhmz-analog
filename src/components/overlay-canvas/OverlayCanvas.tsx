@@ -164,7 +164,10 @@ export function OverlayCanvas({
   );
 
   const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
+    (e: WheelEvent) => {
+      // We always preventDefault on wheel — otherwise Ctrl/Cmd+wheel and
+      // macOS trackpad pinch (which fires wheel-with-ctrlKey) escape to
+      // the browser and zoom the whole page instead of just the chart.
       e.preventDefault();
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
@@ -215,6 +218,17 @@ export function OverlayCanvas({
     },
     [zoom, pan]
   );
+
+  // React's onWheel attaches as a passive listener — e.preventDefault() on
+  // a passive listener is a no-op, which lets Ctrl/Cmd+wheel and macOS
+  // trackpad pinch (wheel-with-ctrlKey) trigger native page zoom. Bind a
+  // non-passive listener via the ref so preventDefault actually wins.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.addEventListener("wheel", handleWheel, { passive: false });
+    return () => el.removeEventListener("wheel", handleWheel);
+  }, [handleWheel]);
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -387,7 +401,7 @@ export function OverlayCanvas({
       <div
         ref={containerRef}
         className="w-full h-full cursor-precise"
-        onWheel={handleWheel}
+        style={{ touchAction: "none" }}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}

@@ -579,7 +579,10 @@ function ChartCanvas({ state }: { state: SessionState }) {
             : "cursor-grab"
           : "cursor-default"
       )}
-      style={{ overscrollBehavior: "contain" }}
+      // `touch-action: none` blocks the browser from interpreting
+      // pinch / two-finger gestures as page zoom while the cursor is on the
+      // chart — we route those into our zoom-around handler below.
+      style={{ overscrollBehavior: "contain", touchAction: "none" }}
     >
       <div
         ref={contentRef}
