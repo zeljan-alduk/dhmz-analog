@@ -23,30 +23,39 @@ from .sessions import (
     cleanup_loop as sessions_cleanup_loop,
     load_all_sessions,
 )
+from .customizations import (
+    router as customizations_router,
+    cleanup_loop as customizations_cleanup_loop,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("dhmz")
 
 app = FastAPI(title="DHMZ Backend", version="1.0.0")
 app.include_router(sessions_router, prefix="/api")
+app.include_router(customizations_router, prefix="/api")
 
 
 @app.on_event("startup")
-async def _start_session_cleanup() -> None:
+async def _start_cleanup_loops() -> None:
     # Re-hydrate sessions from disk first so any in-flight long-polls reconnect.
     load_all_sessions()
     app.state._sessions_cleanup_task = asyncio.create_task(sessions_cleanup_loop())
+    app.state._customizations_cleanup_task = asyncio.create_task(
+        customizations_cleanup_loop()
+    )
 
 
 @app.on_event("shutdown")
-async def _stop_session_cleanup() -> None:
-    task = getattr(app.state, "_sessions_cleanup_task", None)
-    if task is not None:
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+async def _stop_cleanup_loops() -> None:
+    for attr in ("_sessions_cleanup_task", "_customizations_cleanup_task"):
+        task = getattr(app.state, attr, None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 @app.get("/api/health")

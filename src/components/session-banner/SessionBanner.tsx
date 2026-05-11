@@ -53,7 +53,23 @@ OPERATIVNA AUTONOMIJA:
   dalje bez dodatne provjere.
 - Dugi pozivi (extract-trace 30-60s): najavi "⏳ Vrtim:
   extract-trace (~30s)", izvrši, objavi rezultate (+ overlay
-  attachment kad smisleno). Bez blokiranja na potvrdu prije.`;
+  attachment kad smisleno). Bez blokiranja na potvrdu prije.
+
+LIVE UI CUSTOMIZATION:
+
+Kad korisnik traži promjenu izgleda alata ("dodaj gumb za X",
+"sakri kalibracijski panel", "novi pregled koji..."), NE diraj
+repo. Koristi customization endpointe:
+
+  PUT /api/sessions/<sid>/customization/css { "css": "..." }
+  PUT /api/sessions/<sid>/customization/slots/<slot> { "name", "jsx" }
+  DELETE /api/sessions/<sid>/customization/slots/<slot>
+  DELETE /api/sessions/<sid>/customization   (clear all)
+
+Slotovi: toolbar-extra | sidebar-extra | overlay | route.
+JSX mora definirati top-level Component({host}) → JSX. Sucrase
+compila u browseru (instant); persistira sa sesijom; korisnik moze
+save_customization-irati za trajno + share-link.`;
 
   const desktopPrompt = `Pomozi mi digitalizirati session ${info.id} (URL: ${info.url}).
 Spojen si preko \`dhmz\` MCP servera — koristi te toolove, ne curl.
@@ -88,7 +104,29 @@ OPERATIVNA AUTONOMIJA:
 - Dugi pozivi (\`extract_trace\` 30-60s): najavi "⏳ Vrtim:
   extract_trace (~30s)" preko \`post_chat\`, izvrši, objavi
   rezultate (+ overlay slika kao \`images\` attachment kad
-  smisleno). Bez blokiranja na potvrdu prije.`;
+  smisleno). Bez blokiranja na potvrdu prije.
+
+LIVE UI CUSTOMIZATION:
+
+Kad korisnik traži promjenu izgleda alata ("dodaj gumb za X",
+"sakri panel Y", "novi pregled koji..."), NE diraj repo. Koristi
+customization toolove:
+
+  apply_css(css)                          — \`<style>\` na host head
+  mount_slot(slot, name, jsx)             — React komponenta u slot
+  unmount_slot(slot)
+  clear_customization()
+  save_customization_as_version(name)     — share-link short id
+  apply_customization_from_id(id)
+  get_customization()
+
+Slotovi: \`toolbar-extra\` | \`sidebar-extra\` | \`overlay\` | \`route\`.
+JSX mora definirati top-level \`function Component({host}){...}\` →
+JSX (Sucrase compila u browseru). Unutar imaš \`host.api\`
+(postChat, extractTrace, downloadCsv, fetchJson), \`host.state\`
+(read-only snapshot), \`host.React\` (za useState/useEffect).
+Persistira sa sesijom; ako korisnik kaže "spremi trajno", pozovi
+\`save_customization_as_version\` i daj mu \`?cv=<id>\` link.`;
 
   const claudePrompt = mode === "cli" ? cliPrompt : desktopPrompt;
 

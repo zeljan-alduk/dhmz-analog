@@ -144,6 +144,140 @@ def get_csv(session_id: Optional[str] = None) -> str:
     return r.text
 
 
+# ─── Live UI customization ───────────────────────────────────────────────
+# Claude can mutate the host page's UI without changing the repo: apply CSS,
+# mount JSX components into named slots (toolbar-extra, sidebar-extra,
+# overlay, route), or save the current customization as a shareable version.
+
+@mcp.tool()
+def get_customization(session_id: Optional[str] = None) -> dict:
+    """Return the live customization on this session (`{css?, slots?}`).
+
+    Empty dict means the host UI is in its default state. The same shape is
+    also visible inside `get_state()['customization']`.
+    """
+    r = _check(_client.get(_url(_sid(session_id), "/customization")))
+    return r.json()
+
+
+@mcp.tool()
+def apply_css(
+    css: str,
+    session_id: Optional[str] = None,
+) -> dict:
+    """Set / replace the customization CSS for this session.
+
+    The string is applied verbatim inside `<style id="dhmz-cust-css">` on
+    the host page (visible to anyone watching the session URL). Pass an
+    empty string to clear just the CSS without touching slot mounts.
+
+    Example: `apply_css(".session-toolbar { background: #fffbeb; }")`.
+    """
+    r = _check(_client.put(_url(_sid(session_id), "/customization/css"),
+                           json={"css": css}))
+    return r.json()
+
+
+@mcp.tool()
+def mount_slot(
+    slot: Literal["toolbar-extra", "sidebar-extra", "overlay", "route"],
+    name: str,
+    jsx: str,
+    session_id: Optional[str] = None,
+) -> dict:
+    """Mount a JSX component into a named host UI slot.
+
+    `jsx` must define a top-level React component named `Component` that
+    takes `{ host }` and returns JSX. It's compiled in-browser via Sucrase
+    and rendered into the slot. Re-calling overrides the previous mount in
+    the same slot.
+
+    Slots:
+      - `toolbar-extra`  → right end of the top toolbar (small inline button)
+      - `sidebar-extra`  → bottom of right sidebar (panels under data points)
+      - `overlay`        → full-screen modal-style overlay above the chart
+      - `route`          → standalone sub-page replacing the main view
+
+    Inside the JSX, `host.api.*` exposes app actions (extractTrace, postChat,
+    downloadCsv, fetchJson) and `host.state` exposes a read-only session
+    snapshot. Use `host.React.useState` / `useEffect` for component state.
+
+    Example for slot="toolbar-extra":
+
+        function Component({ host }) {
+          const [n, setN] = host.React.useState(0);
+          return host.React.createElement(
+            'button',
+            { onClick: () => { setN(n+1); host.api.postChat('clicked ' + n); } },
+            'Clicked ' + n,
+          );
+          // (Or use JSX <button>...</button> — Sucrase compiles it.)
+        }
+    """
+    r = _check(_client.put(
+        _url(_sid(session_id), f"/customization/slots/{slot}"),
+        json={"name": name, "jsx": jsx},
+    ))
+    return r.json()
+
+
+@mcp.tool()
+def unmount_slot(
+    slot: Literal["toolbar-extra", "sidebar-extra", "overlay", "route"],
+    session_id: Optional[str] = None,
+) -> dict:
+    """Remove the component currently mounted in `slot`."""
+    r = _check(_client.delete(_url(_sid(session_id), f"/customization/slots/{slot}")))
+    return r.json()
+
+
+@mcp.tool()
+def clear_customization(session_id: Optional[str] = None) -> dict:
+    """Clear all customization on this session (CSS + every slot)."""
+    r = _check(_client.delete(_url(_sid(session_id), "/customization")))
+    return r.json()
+
+
+@mcp.tool()
+def save_customization_as_version(
+    name: str,
+    session_id: Optional[str] = None,
+) -> dict:
+    """Upload the session's current customization to the share store and
+    return `{id, expiresAt}`. The id can be used in `?cv=<id>` URLs and is
+    valid for 30 days. The session's own customization is unaffected.
+
+    Use when the user says "save this" / "share this view" — the returned
+    id is what gets pasted into a link.
+    """
+    cust = _check(_client.get(_url(_sid(session_id), "/customization"))).json()
+    body: dict[str, Any] = {"name": name}
+    if cust.get("css"):
+        body["css"] = cust["css"]
+    if cust.get("slots"):
+        body["slots"] = cust["slots"]
+    r = _check(_client.post(f"{BASE_URL}/customizations", json=body))
+    return r.json()
+
+
+@mcp.tool()
+def apply_customization_from_id(
+    customization_id: str,
+    session_id: Optional[str] = None,
+) -> dict:
+    """Fetch a saved customization by id and apply it to the current session
+    (replaces any existing customization).
+    """
+    fetched = _check(_client.get(f"{BASE_URL}/customizations/{customization_id}")).json()
+    body: dict[str, Any] = {}
+    if fetched.get("css"):
+        body["css"] = fetched["css"]
+    if fetched.get("slots"):
+        body["slots"] = fetched["slots"]
+    r = _check(_client.put(_url(_sid(session_id), "/customization"), json=body))
+    return r.json()
+
+
 @mcp.tool()
 def get_chat_attachment(
     attachment_id: str,

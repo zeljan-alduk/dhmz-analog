@@ -1,8 +1,19 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { DhmzHostContext } from "@/lib/customizations/host-api";
+import { buildDhmzHost, useCustomizationCss } from "@/lib/customizations/runtime";
+import { CustomizationSlot } from "@/lib/customizations/slots";
+import { ModifiedChip } from "@/components/customization-manager/ModifiedChip";
+import { VersionManagerModal } from "@/components/customization-manager/VersionManagerModal";
+import { ImportModal } from "@/components/customization-manager/ImportModal";
+import {
+  isCustomizationEmpty,
+  type Customization,
+} from "@/lib/customizations/types";
+import { listVersions } from "@/lib/customizations/storage";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 type SessionAnnotation = {
@@ -78,6 +89,7 @@ type SessionState = {
   rois: SessionROI[];
   panels: Record<string, string>;
   scratchHtml: ScratchHTML | null;
+  customization?: import("@/lib/customizations/types").Customization;
 };
 
 const POLL_INTERVAL_MS = 1500;
@@ -95,12 +107,28 @@ export default function SessionPage() {
 function SessionPageInner() {
   const params = useSearchParams();
   const id = params?.get("id") ?? null;
+  const importCustomizationId = params?.get("cv") ?? null;
 
   const [state, setState] = useState<SessionState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [claudeActive, setClaudeActive] = useState(false);
   const versionRef = useRef<number>(-1);
   const lastBumpRef = useRef<number>(0);
+
+  const refresh = useCallback(async () => {
+    if (!id) return;
+    try {
+      const fr = await fetch(`/api/sessions/${id}`, { cache: "no-store" });
+      if (fr.ok) {
+        const full = (await fr.json()) as SessionState;
+        setState(full);
+        versionRef.current = full.version;
+        lastBumpRef.current = Date.now();
+      }
+    } catch (e) {
+      console.warn("manual refresh failed", e);
+    }
+  }, [id]);
 
   useEffect(() => {
     if (!id) return;
@@ -157,7 +185,14 @@ function SessionPageInner() {
   if (error) return <FullPageMessage variant="error">{error}</FullPageMessage>;
   if (!state) return <FullPageMessage>Loading session {id}…</FullPageMessage>;
 
-  return <SessionView state={state} claudeActive={claudeActive} />;
+  return (
+    <SessionView
+      state={state}
+      claudeActive={claudeActive}
+      refresh={refresh}
+      importCustomizationId={importCustomizationId}
+    />
+  );
 }
 
 function FullPageMessage({
@@ -188,20 +223,156 @@ const PREVIEW_BASE_MAX = 2000;
 function SessionView({
   state,
   claudeActive,
+  refresh,
+  importCustomizationId,
 }: {
   state: SessionState;
   claudeActive: boolean;
+  refresh: () => Promise<void>;
+  importCustomizationId: string | null;
 }) {
+  const customization: Customization | null = state.customization ?? null;
+  const isCustActive = !isCustomizationEmpty(customization);
+  const [versionModalOpen, setVersionModalOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importHandled, setImportHandled] = useState(false);
+  const [versionCount, setVersionCount] = useState(0);
+
+  useCustomizationCss(customization?.css);
+
+  // Keep the chip's saved-version count in sync with localStorage.
+  useEffect(() => {
+    setVersionCount(listVersions().length);
+  }, [versionModalOpen, importOpen]);
+
+  // Open import modal once if URL carries `?cv=<id>`.
+  useEffect(() => {
+    if (importCustomizationId && !importHandled) {
+      setImportOpen(true);
+      setImportHandled(true);
+    }
+  }, [importCustomizationId, importHandled]);
+
+  const host = useMemo(
+    () =>
+      buildDhmzHost({
+        sessionId: state.id,
+        refresh,
+        state: {
+          id: state.id,
+          version: state.version,
+          chartType: state.chartType,
+          rotationDeg: state.rotationDeg,
+          imageNaturalSize: state.imageNaturalSize,
+          imageUrl: state.imageUrl,
+          dataPointsCount: state.dataPoints.length,
+          hasCalibration: state.calibration.length > 0,
+        },
+      }),
+    [
+      state.id,
+      state.version,
+      state.chartType,
+      state.rotationDeg,
+      state.imageNaturalSize,
+      state.imageUrl,
+      state.dataPoints.length,
+      state.calibration.length,
+      refresh,
+    ]
+  );
+
+  const putCustomization = useCallback(
+    async (c: Customization) => {
+      const body: Record<string, unknown> = {};
+      if (c.css?.trim()) body.css = c.css;
+      if (c.slots && Object.keys(c.slots).length > 0) body.slots = c.slots;
+      const resp = await fetch(`/api/sessions/${state.id}/customization`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) throw new Error(`PUT customization → HTTP ${resp.status}`);
+      await refresh();
+    },
+    [state.id, refresh]
+  );
+
+  const clearCustomization = useCallback(async () => {
+    await fetch(`/api/sessions/${state.id}/customization`, { method: "DELETE" });
+    await refresh();
+  }, [state.id, refresh]);
+
+  // If `route` slot is mounted, it replaces the entire main + aside view.
+  const routeMount = customization?.slots?.route;
+
   return (
-    <div className="min-h-screen flex bg-neutral-50 text-neutral-900">
-      <main className="flex-1 relative overflow-hidden bg-neutral-100">
-        <ChartCanvas state={state} />
-        {state.scratchHtml && <ScratchPanel scratch={state.scratchHtml} />}
-      </main>
-      <aside className="w-96 shrink-0 border-l bg-white overflow-y-auto">
-        <Sidebar state={state} claudeActive={claudeActive} />
-      </aside>
-    </div>
+    <DhmzHostContext.Provider value={host}>
+      {routeMount ? (
+        <div className="min-h-screen bg-neutral-50 text-neutral-900 relative">
+          <CustomizationSlot slot="route" customization={customization} />
+          <div className="fixed top-3 right-3 z-30">
+            <ModifiedChip
+              active={isCustActive}
+              versionCount={versionCount}
+              onClick={() => setVersionModalOpen(true)}
+            />
+          </div>
+        </div>
+      ) : (
+        <div className="min-h-screen flex bg-neutral-50 text-neutral-900">
+          <main className="flex-1 relative overflow-hidden bg-neutral-100">
+            <ChartCanvas state={state} />
+            {state.scratchHtml && <ScratchPanel scratch={state.scratchHtml} />}
+            <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
+              <CustomizationSlot
+                slot="toolbar-extra"
+                customization={customization}
+              />
+              <ModifiedChip
+                active={isCustActive}
+                versionCount={versionCount}
+                onClick={() => setVersionModalOpen(true)}
+              />
+            </div>
+            {customization?.slots?.overlay && (
+              <div className="absolute inset-0 z-30 pointer-events-none">
+                <div className="pointer-events-auto h-full">
+                  <CustomizationSlot
+                    slot="overlay"
+                    customization={customization}
+                  />
+                </div>
+              </div>
+            )}
+          </main>
+          <aside className="w-96 shrink-0 border-l bg-white overflow-y-auto">
+            <Sidebar state={state} claudeActive={claudeActive} />
+            <div className="px-4 py-3 border-t border-neutral-200">
+              <CustomizationSlot
+                slot="sidebar-extra"
+                customization={customization}
+              />
+            </div>
+          </aside>
+        </div>
+      )}
+      {versionModalOpen && (
+        <VersionManagerModal
+          active={customization}
+          onClose={() => setVersionModalOpen(false)}
+          onApply={putCustomization}
+          onRevert={clearCustomization}
+        />
+      )}
+      {importOpen && importCustomizationId && (
+        <ImportModal
+          customizationId={importCustomizationId}
+          onClose={() => setImportOpen(false)}
+          onApply={(c) => putCustomization(c)}
+        />
+      )}
+    </DhmzHostContext.Provider>
   );
 }
 

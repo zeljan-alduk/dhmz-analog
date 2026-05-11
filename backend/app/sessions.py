@@ -139,6 +139,11 @@ class Session:
     rois: List[dict] = field(default_factory=list)
     panels: dict = field(default_factory=dict)              # name → markdown
     scratch_html: Optional[ScratchHTML] = None
+    # Live UI customization: `{css?: str, slots?: {slot_id: {name, jsx}}}`.
+    # Compiled in the browser via Sucrase + mounted into named host slots.
+    # Persists with the session (so survives backend restart) and can be
+    # saved/shared as a Customization record (see customizations.py).
+    customization: dict = field(default_factory=dict)
     image_revision: int = 0      # increments every image swap
     version: int = 0
     # Cache of resampled image variants keyed by (rev, max, box, fmt).
@@ -430,6 +435,7 @@ def _serialize_state(s: Session) -> dict:
             {"html": s.scratch_html.html, "css": s.scratch_html.css, "js": s.scratch_html.js}
             if s.scratch_html is not None else None
         ),
+        "customization": dict(s.customization) if s.customization else {},
     }
 
 
@@ -507,6 +513,7 @@ def _serialize_session_for_disk(s: "Session") -> dict:
              "js": s.scratch_html.js}
             if s.scratch_html else None
         ),
+        "customization": dict(s.customization) if s.customization else {},
         "notes": [{"ts": n.ts, "text": n.text, "by": n.by} for n in s.notes],
         "chat_messages": [
             {
@@ -606,6 +613,7 @@ def _load_session_from_disk(d: _FsPath) -> Optional["Session"]:
             SessionNote(ts=float(n["ts"]), text=n["text"], by=n["by"])
             for n in state.get("notes", [])
         ]
+        s.customization = dict(state.get("customization") or {})
         chat_msgs: List[ChatMessage] = []
         for m in state.get("chat_messages", []):
             atts: List[ChatAttachment] = []
@@ -1112,6 +1120,127 @@ def delete_scratch_html(sid: str) -> VersionResponse:
         raise HTTPException(404, "scratch-html not set")
     s.scratch_html = None
     s.bump("Cleared scratch-HTML.", by="claude")
+    return VersionResponse(version=s.version)
+
+
+# ─── Live UI customization on a session ────────────────────────────────
+ALLOWED_SLOT_IDS = frozenset({"toolbar-extra", "sidebar-extra", "overlay", "route"})
+MAX_JSX_BYTES = 200_000
+MAX_CSS_BYTES = 200_000
+
+
+class SlotMountBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    jsx: str = Field(..., min_length=1, max_length=MAX_JSX_BYTES)
+
+
+class CustomizationBody(BaseModel):
+    """Whole-customization replace. `slots` keys must be in ALLOWED_SLOT_IDS."""
+    css: Optional[str] = Field(default=None, max_length=MAX_CSS_BYTES)
+    slots: Optional[dict[str, SlotMountBody]] = None
+
+
+class CssBody(BaseModel):
+    css: str = Field(..., max_length=MAX_CSS_BYTES)
+
+
+def _validate_slot_id(slot_id: str) -> None:
+    if slot_id not in ALLOWED_SLOT_IDS:
+        raise HTTPException(
+            400,
+            f"unknown slot id {slot_id!r}; valid: {sorted(ALLOWED_SLOT_IDS)}",
+        )
+
+
+@router.get("/sessions/{sid}/customization")
+def get_session_customization(sid: str) -> dict:
+    s = _require(sid)
+    return dict(s.customization or {})
+
+
+@router.put("/sessions/{sid}/customization", response_model=VersionResponse)
+def put_session_customization(sid: str, body: CustomizationBody) -> VersionResponse:
+    """Replace the whole customization on the session (CSS + slot mounts)."""
+    s = _require(sid)
+    cust: dict = {}
+    if body.css is not None and body.css.strip():
+        cust["css"] = body.css
+    if body.slots:
+        for slot_id in body.slots:
+            _validate_slot_id(slot_id)
+        cust["slots"] = {k: v.model_dump() for k, v in body.slots.items()}
+    s.customization = cust
+    s.bump(
+        f"Customization set (css={'yes' if 'css' in cust else 'no'}, "
+        f"slots={list(cust.get('slots', {}).keys())}).",
+        by="claude",
+    )
+    return VersionResponse(version=s.version)
+
+
+@router.delete("/sessions/{sid}/customization", response_model=VersionResponse)
+def clear_session_customization(sid: str) -> VersionResponse:
+    s = _require(sid)
+    if not s.customization:
+        return VersionResponse(version=s.version)
+    s.customization = {}
+    s.bump("Cleared customization.", by="claude")
+    return VersionResponse(version=s.version)
+
+
+@router.put("/sessions/{sid}/customization/css", response_model=VersionResponse)
+def put_session_customization_css(sid: str, body: CssBody) -> VersionResponse:
+    s = _require(sid)
+    cust = dict(s.customization or {})
+    if body.css.strip():
+        cust["css"] = body.css
+    else:
+        cust.pop("css", None)
+    s.customization = cust
+    s.bump(f"Set customization CSS ({len(body.css)} chars).", by="claude")
+    return VersionResponse(version=s.version)
+
+
+@router.put(
+    "/sessions/{sid}/customization/slots/{slot_id}",
+    response_model=VersionResponse,
+)
+def put_session_customization_slot(
+    sid: str, slot_id: str, body: SlotMountBody
+) -> VersionResponse:
+    _validate_slot_id(slot_id)
+    s = _require(sid)
+    cust = dict(s.customization or {})
+    slots = dict(cust.get("slots") or {})
+    slots[slot_id] = body.model_dump()
+    cust["slots"] = slots
+    s.customization = cust
+    s.bump(
+        f"Mounted slot {slot_id!r} = {body.name!r} ({len(body.jsx)} chars JSX).",
+        by="claude",
+    )
+    return VersionResponse(version=s.version)
+
+
+@router.delete(
+    "/sessions/{sid}/customization/slots/{slot_id}",
+    response_model=VersionResponse,
+)
+def delete_session_customization_slot(sid: str, slot_id: str) -> VersionResponse:
+    _validate_slot_id(slot_id)
+    s = _require(sid)
+    cust = dict(s.customization or {})
+    slots = dict(cust.get("slots") or {})
+    if slot_id not in slots:
+        raise HTTPException(404, f"slot {slot_id!r} not mounted")
+    name = slots[slot_id].get("name")
+    del slots[slot_id]
+    if slots:
+        cust["slots"] = slots
+    else:
+        cust.pop("slots", None)
+    s.customization = cust
+    s.bump(f"Unmounted slot {slot_id!r} (was {name!r}).", by="claude")
     return VersionResponse(version=s.version)
 
 
@@ -1757,6 +1886,48 @@ swaps the image via `POST /image`. Re-fetch when it changes.
                  "  -d '{\"html\":\"<h2>Stats</h2><div id=root></div>\",\"css\":\"h2{color:#08f}\",\"js\":\"document.getElementById(\\\"root\\\").innerText=\\\"hello\\\"\"}'\n\n"
                  f"curl -s -X DELETE {base}/scratch-html\n"
                  "```\n")
+
+    parts.append("## Tools — live UI customization (host page edits)\n\n"
+                 "When the user asks for UI changes (\"add a button for X\",\n"
+                 "\"hide the calibration panel\", \"new view that…\"), **do not**\n"
+                 "edit the repo — use the customization layer. CSS is applied as\n"
+                 "`<style>` on the host head; JSX mounts are compiled in-browser\n"
+                 "via Sucrase and rendered into named host slots. Both persist\n"
+                 "with the session.\n\n"
+                 "**Slots** (where the mount renders):\n"
+                 "  - `toolbar-extra` — small inline UI top-right of the chart\n"
+                 "  - `sidebar-extra` — bottom of the right sidebar\n"
+                 "  - `overlay`       — full-screen modal-style layer above chart\n"
+                 "  - `route`         — replaces the entire chart+sidebar view\n\n"
+                 "JSX convention: source must define a top-level\n"
+                 "`function Component({ host }) { ... }` that returns JSX. Inside,\n"
+                 "`host.api.*` exposes app actions (postChat, extractTrace,\n"
+                 "downloadCsv, fetchJson) and `host.state` is a read-only snapshot.\n"
+                 "Use `host.React.useState` / `useEffect` for component state.\n\n"
+                 "```bash\n"
+                 "# CSS override\n"
+                 f'curl -s -X PUT -H "Content-Type: application/json" \\\n'
+                 f"  {base}/customization/css \\\n"
+                 "  -d '{\"css\":\".session-toolbar{background:#fffbeb}\"}'\n\n"
+                 "# Mount a JSX component in toolbar-extra\n"
+                 f'curl -s -X PUT -H "Content-Type: application/json" \\\n'
+                 f"  {base}/customization/slots/toolbar-extra \\\n"
+                 "  -d '{\"name\":\"Quick Export\",\"jsx\":\"function Component({host}){return <button onClick={()=>host.api.downloadCsv()}>Export CSV</button>;}\"}'\n\n"
+                 "# Clear one slot, or all\n"
+                 f"curl -s -X DELETE {base}/customization/slots/toolbar-extra\n"
+                 f"curl -s -X DELETE {base}/customization\n\n"
+                 "# Save the current customization as a shareable version (30d TTL)\n"
+                 f"curl -s -X POST -H \"Content-Type: application/json\" \\\n"
+                 f"  {PUBLIC_BASE_URL}/api/customizations \\\n"
+                 "  -d '{\"name\":\"compact-view\",\"css\":\"...\",\"slots\":{...}}'\n"
+                 "# Returns {id, expiresAt}; share URL: "
+                 f"`{PUBLIC_BASE_URL}/session/?id={sid}&cv=<id>`\n"
+                 "```\n\n"
+                 "If the user says \"save this permanently\" or \"share this\",\n"
+                 "POST the current customization to `/api/customizations` and\n"
+                 "hand them the share URL. The browser modal will offer\n"
+                 "\"Apply + save locally\" which puts it into their localStorage\n"
+                 "version list.\n")
 
     parts.append("## Tools — image swap (manipulate locally and push)\n\n"
                  "Want to enhance contrast, denoise, deskew differently, crop, or run\n"
