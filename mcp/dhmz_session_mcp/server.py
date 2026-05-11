@@ -602,20 +602,30 @@ def add_note(
 @mcp.tool()
 def post_chat(
     text: str,
+    kind: Literal["reply", "thinking"] = "reply",
     images: Optional[list[str]] = None,
     session_id: Optional[str] = None,
 ) -> dict:
-    """Post a chat message as "claude" — this is the **primary** way to
-    talk to the user (per the briefing's "Communication discipline"
-    section). Long-poll `poll_chat` for their reply.
+    """Post a chat message as "claude" — primary channel for talking to
+    the user (per the briefing's "Communication discipline").
+
+    Two `kind`s, pick deliberately:
+      * `"reply"`    — normal post: greetings, plan, status updates,
+                       results, questions. Renders full-size in the chat.
+      * `"thinking"` — rationale / internal monologue ("considering X over
+                       Y because…"). Renders dimmed + collapsed-by-default
+                       in the browser so the chat feed stays clean.
+
+    Use `thinking` liberally for reasoning the user might want to peek at
+    but shouldn't have to read in full; use `reply` for anything the user
+    is supposed to actually act on (questions especially).
 
     Args:
-      text: ≤4000 chars. Use the `⏳ Vrtim: X (~Xs). Napiši stop za prekid.`
-        convention before kicking off any long-running pipeline.
-      images: optional list of up to 4 attachments. Each entry is a
-        filesystem path or a base64 string (with or without `data:` prefix).
+      text: ≤4000 chars. Use `⏳ Vrtim: X (~Xs)` convention before any
+        long-running pipeline call.
+      images: optional ≤4 attachments — filesystem paths or base64 strings.
     """
-    body: dict[str, Any] = {"text": text}
+    body: dict[str, Any] = {"text": text, "kind": kind}
     if images:
         b64s = []
         for src in images:

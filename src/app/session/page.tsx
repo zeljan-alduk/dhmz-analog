@@ -64,6 +64,10 @@ type SessionChatMessage = {
   ts: number;
   by: "claude" | "user";
   text: string;
+  /** "reply" = normal full bubble. "thinking" = dimmed/italic, collapsed
+   *  preview that expands on click. Older messages may omit this — treat
+   *  as "reply" by default. */
+  kind?: "reply" | "thinking";
   attachments?: SessionChatAttachment[];
 };
 
@@ -1417,8 +1421,16 @@ function ChatBubble({ m }: { m: SessionChatMessage }) {
   const [lightbox, setLightbox] = useState<SessionChatAttachment | null>(null);
   const isUser = m.by === "user";
   const isClaude = m.by === "claude";
+  const isThinking = m.kind === "thinking";
   const senderLabel = isUser ? "You" : isClaude ? "Claude" : "System";
   const initial = isUser ? "U" : isClaude ? "C" : "S";
+
+  // Thinking-mode: render as a dimmed/italic collapsible row instead of a
+  // full bubble, so reasoning doesn't crowd the user-facing transcript.
+  if (isThinking && isClaude) {
+    return <ThinkingRow m={m} />;
+  }
+
   return (
     <>
       <div
@@ -1552,6 +1564,52 @@ function NotesSection({ notes }: { notes: SessionNote[] }) {
         ))}
       </div>
     </section>
+  );
+}
+
+// ─── Thinking row (collapsed reasoning) ──────────────────────────────────
+/**
+ * Compact rendering for Claude's `kind="thinking"` messages. Renders as a
+ * single dimmed italic row with a 💭 marker; click to toggle expand. Lives
+ * inline with the chat feed but visually disambiguates from real replies so
+ * the user can skim past unless they want the rationale.
+ */
+function ThinkingRow({ m }: { m: SessionChatMessage }) {
+  const [open, setOpen] = useState(false);
+  const firstLine = (m.text.split("\n").find((l) => l.trim()) ?? m.text).trim();
+  const preview =
+    firstLine.length > 100 ? firstLine.slice(0, 100) + "…" : firstLine;
+  return (
+    <div className="flex gap-2 items-start text-[11px] text-neutral-500 italic px-1">
+      <span
+        aria-hidden
+        className="shrink-0 w-5 h-5 rounded-full bg-neutral-100 border border-neutral-200 flex items-center justify-center not-italic text-[10px]"
+        title="thinking"
+      >
+        💭
+      </span>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex-1 min-w-0 text-left hover:text-neutral-700 transition-colors"
+      >
+        {open ? (
+          <div className="whitespace-pre-wrap break-words leading-relaxed">
+            <MarkdownText text={m.text} dark={false} />
+            <div className="text-[10px] text-neutral-400 not-italic mt-1">
+              {fmtChatTime(m.ts)} · click to collapse
+            </div>
+          </div>
+        ) : (
+          <div className="truncate flex items-center gap-2">
+            <span className="truncate">{preview}</span>
+            <span className="text-[10px] text-neutral-400 not-italic shrink-0">
+              {fmtChatTime(m.ts)}
+            </span>
+          </div>
+        )}
+      </button>
+    </div>
   );
 }
 

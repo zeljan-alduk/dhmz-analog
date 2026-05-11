@@ -29,110 +29,106 @@ export function SessionBanner({
 
   const cliPrompt = `${sessionUrl} — pomozi mi digitalizirati ovaj sken.
 
-KOMUNIKACIJSKI STIL:
+KORAK 1 — BRZI HANDSHAKE (bez "smijem li" pitanja, paste URL-a je
+autorizacija za read i chat):
+1) POST /chat-claude "spojen, gledam sken" — odmah, da vidim da si tu.
+2) Paralelno: GET /context, GET /api/sessions/<sid>, GET image
+   (downsampled, ~1200 px).
+3) U chat 1-2 rečenice: chart-type, dimenzije, prva opažanja.
 
-- Glavni prozor je session web chat (browser). Sve što radiš mora
-  biti tamo vidljivo kao live screen-share: kratak plan na početku,
-  pa "doing X → done, Y points, range Z" za svaki korak, pa
-  završni sažetak. Bez tišine, bez monoloških zidova.
-- Razmišljanje koje vodi do odluke (zašto baš ove kalibracijske
-  korne, zašto traceInk=blue, zašto jpeg umjesto png) eksplicitno
-  napiši u chat poruku — web chat ne prikazuje tvoje thinking
-  blokove sam od sebe. Trivijalnosti (state read) preskoči.
-- U terminal pišeš najviše jednu kratku liniju po koraku
-  ("posting status, running extract"). Sva soft content ide u chat.
+KORAK 2 — KAD KORISNIK NEŠTO TRAŽI ili PRISTUPA SAM, OVAKO REAGIRAJ:
+- IMMEDIATE ACK (kind="reply"): jedna kratka rečenica koja pokazuje da
+  si razumio ("Razumio — krećem na X" ili "Pogledat ću Y, vraćam se za
+  par sec").
+- Razmišljanje (rationale, vagaja opcija, "zašto baš ovaj prag") POSTAJ
+  s kind="thinking" — frontend prikazuje dimmed/collapsed, ne clutters
+  feed. Koristi liberalno.
+- Status korakom u chatu (kind="reply"): "X → done, n=Y".
+- Rezultat / pitanje korisniku: kind="reply".
 
-OPERATIVNA AUTONOMIJA:
+NEMOJ NAMETATI:
+- Ne kreni s kalibracijom, extractom, swap_imageom dok te ne pitam ili
+  dok pristojno ne ponudiš opcije i ne dobiješ jasan signal.
+- Predloži opcije kao pitanje: "Mogu (a) auto-cal → extract, (b) ručna
+  kalibracija prvo, (c) samo pregled. Što voliš?"
+- Long-poll /chat?since=N&wait=30 dok čekaš jasan odgovor.
 
-- Briefing s /context čitaš jednom kao **prijedlog**, ne nalog.
-  Sažmi mi ga u 2-3 rečenice u chatu i KREĆI. Ne traži OK osim
-  ako tražim drugačije.
-- Plan → izvedi → komentiraj usput. Ne čekaj između koraka.
-  Konkretno: kalibracija → extract → CSV kreće bez pauze, samo
-  s vidljivim status-postovima.
-- Pitaj me SAMO kad: (a) stvarna ambivalencija (dvije podjednako
-  dobre interpretacije skena), ili (b) prije destruktivnog koraka
-  (POST /image swap, DELETE /annotations, DELETE /data-points).
-- "stop" konvencija: između koraka pozovi
-  /chat?since=N&wait=2 (skoro non-blocking). Ako stigne poruka
-  koja sadrži "stop", prekini i čekaj daljnje upute. Inače idi
-  dalje bez dodatne provjere.
-- Dugi pozivi (extract-trace 30-60s): najavi "⏳ Vrtim:
-  extract-trace (~30s)", izvrši, objavi rezultate (+ overlay
-  attachment kad smisleno). Bez blokiranja na potvrdu prije.
+JEDNOM KAD DOBIJEM ODABIR:
+- Izvrši cijeli put autonomno, bez međupotvrda. Status-postovi usput
+  (kind="reply" kratko + kind="thinking" za rationale).
+- Pitaj me ponovo SAMO prije nepovratnih (swap_image, clear_data_points,
+  clear_annotations) ili stvarne dvojbe.
+- Dugi pozivi: najavi "⏳ Vrtim: X (~Ys)" (kind="reply"), izvrši, objavi
+  rezultate. Bez prethodne potvrde.
+- Između koraka /chat?since=N&wait=2; "stop" → prekini.
 
-LIVE UI CUSTOMIZATION:
+CHAT JE GLAVNI PROZOR: sve plan / status / razmišljanje / rezultati idu
+u /chat-claude. U terminal pišeš najviše kratki status po koraku.
 
-Kad korisnik traži promjenu izgleda alata ("dodaj gumb za X",
-"sakri kalibracijski panel", "novi pregled koji..."), NE diraj
-repo. Koristi customization endpointe:
-
-  PUT /api/sessions/<sid>/customization/css { "css": "..." }
-  PUT /api/sessions/<sid>/customization/slots/<slot> { "name", "jsx" }
-  DELETE /api/sessions/<sid>/customization/slots/<slot>
-  DELETE /api/sessions/<sid>/customization   (clear all)
-
+UI PROMJENE (kad korisnik traži "dodaj gumb / sakri X / novi pregled"):
+Koristi customization endpointe, NE diraj repo:
+  PUT  /sessions/<sid>/customization/css
+  PUT  /sessions/<sid>/customization/slots/<slot>   ({name, jsx})
+  DELETE iste rute za clear.
 Slotovi: toolbar-extra | sidebar-extra | overlay | route.
-JSX mora definirati top-level Component({host}) → JSX. Sucrase
-compila u browseru (instant); persistira sa sesijom; korisnik moze
-save_customization-irati za trajno + share-link.`;
+JSX: function Component({host}) → JSX. Sucrase compila u browseru.
+"Spremi trajno" → POST /api/customizations → daj ?cv=<id> link.`;
 
   const desktopPrompt = `Pomozi mi digitalizirati session ${sessionId} (URL: ${sessionUrl}).
 Spojen si preko \`dhmz\` MCP servera — koristi te toolove, ne curl.
 
-KOMUNIKACIJSKI STIL:
+KORAK 1 — BRZI HANDSHAKE (bez "smijem li" pitanja, paste URL-a je
+autorizacija za read i chat):
+1) \`post_chat("spojen, gledam sken")\` — odmah, da vidim da si tu.
+2) Paralelno: \`get_briefing()\`, \`get_state()\`, \`get_image(max_edge=1200)\`.
+3) U \`post_chat\` 1-2 rečenice: chart-type, dimenzije, prva opažanja.
 
-- Glavni prozor je session web chat (browser). Sve što radiš mora
-  biti tamo vidljivo kao live screen-share: kratak plan na početku,
-  pa "doing X → done, Y points, range Z" za svaki korak, pa
-  završni sažetak. Bez tišine, bez monoloških zidova.
-- Razmišljanje koje vodi do odluke (zašto baš ove kalibracijske
-  korne, zašto traceInk=blue, zašto jpeg umjesto png) eksplicitno
-  napiši u \`post_chat\` — web chat ne prikazuje tvoje Desktop
-  thinking blokove sam od sebe. Trivijalnosti (state read) preskoči.
-- U Desktop chat (ovaj prozor) pišeš najviše kratki status. Sva
-  soft content ide u \`post_chat\`.
+KORAK 2 — KAD KORISNIK NEŠTO TRAŽI ili PRISTUPA SAM, OVAKO REAGIRAJ:
+- IMMEDIATE ACK (\`post_chat(kind="reply")\`): jedna kratka rečenica koja
+  pokazuje da si razumio: "Razumio — krećem na X" ili "Pogledat ću Y,
+  vraćam se za par sec". To je *prije* nego što i počneš pripremu.
+- Razmišljanje (rationale, vagaja opcija, "zašto baš ovaj prag") POSTAJ
+  preko \`post_chat(kind="thinking")\` — frontend ga prikazuje kao dimmed
+  collapsed bubble, ne clutters glavni feed. Koristi liberalno.
+- Status koraka usput (kind="reply"): "X → done, n=Y".
+- Rezultat / pitanje korisniku: kind="reply".
 
-OPERATIVNA AUTONOMIJA:
+NEMOJ NAMETATI:
+- Ne pokreći \`set_calibration\`, \`extract_trace\`, \`swap_image\` ni druge
+  state-mutating toolove dok ne dobiješ jasan signal što korisnik želi.
+- Predloži opcije kao pitanje: "Mogu (a) auto-cal → extract → CSV,
+  (b) ručna kalibracija prvo, (c) samo pregled. Što voliš?"
+- \`poll_chat(since=N, wait=30)\` dok čekaš jasan odgovor.
 
-- \`get_briefing\` čitaš jednom kao **prijedlog**, ne nalog. Sažmi
-  mi ga u 2-3 rečenice (via \`post_chat\`) i KREĆI. Ne traži OK
-  osim ako tražim drugačije.
-- Plan → izvedi → komentiraj usput. Ne čekaj između koraka.
-  Konkretno: \`set_calibration\` → \`extract_trace\` → \`get_csv\`
-  kreće bez pauze, samo s vidljivim \`post_chat\` statusima.
-- Pitaj me SAMO kad: (a) stvarna ambivalencija (dvije podjednako
-  dobre interpretacije skena), ili (b) prije destruktivnog koraka
-  (\`swap_image\`, \`clear_annotations\`, \`clear_data_points\`).
-- "stop" konvencija: između koraka pozovi
-  \`poll_chat(since=N, wait=2)\` (skoro non-blocking). Ako stigne
-  poruka koja sadrži "stop", prekini i čekaj. Inače idi dalje.
-- Dugi pozivi (\`extract_trace\` 30-60s): najavi "⏳ Vrtim:
-  extract_trace (~30s)" preko \`post_chat\`, izvrši, objavi
-  rezultate (+ overlay slika kao \`images\` attachment kad
-  smisleno). Bez blokiranja na potvrdu prije.
+JEDNOM KAD DOBIJEM ODABIR:
+- Izvrši cijeli put autonomno, bez međupotvrda. Status-postovi (kratki
+  kind="reply" + opcionalno kind="thinking" za rationale).
+- Pitaj ponovo SAMO prije nepovratnih (\`swap_image\`,
+  \`clear_annotations\`, \`clear_data_points\`) ili stvarne dvojbe.
+- Dugi pozivi (\`extract_trace\` ~30-60s): najavi "⏳ Vrtim: X (~Ys)"
+  (kind="reply"), izvrši, objavi rezultate (+ overlay slika kao
+  \`images\` attachment).
+- Između koraka \`poll_chat(wait=2)\`; "stop" → prekini.
 
-LIVE UI CUSTOMIZATION:
+CHAT JE GLAVNI PROZOR: sve ide u \`post_chat\`. Desktop chat (ovaj
+prozor) drži se na kratki status.
 
-Kad korisnik traži promjenu izgleda alata ("dodaj gumb za X",
-"sakri panel Y", "novi pregled koji..."), NE diraj repo. Koristi
-customization toolove:
+UI PROMJENE (kad korisnik traži "dodaj gumb / sakri X / novi pregled"):
+Koristi customization toolove, NE diraj repo:
 
-  apply_css(css)                          — \`<style>\` na host head
-  mount_slot(slot, name, jsx)             — React komponenta u slot
-  unmount_slot(slot)
-  clear_customization()
-  save_customization_as_version(name)     — share-link short id
+  apply_css(css)                       — \`<style>\` na host head
+  mount_slot(slot, name, jsx)          — React komponenta u slot
+  unmount_slot(slot) / clear_customization()
+  save_customization_as_version(name)  — share-link short id
   apply_customization_from_id(id)
   get_customization()
 
 Slotovi: \`toolbar-extra\` | \`sidebar-extra\` | \`overlay\` | \`route\`.
-JSX mora definirati top-level \`function Component({host}){...}\` →
-JSX (Sucrase compila u browseru). Unutar imaš \`host.api\`
-(postChat, extractTrace, downloadCsv, fetchJson), \`host.state\`
-(read-only snapshot), \`host.React\` (za useState/useEffect).
-Persistira sa sesijom; ako korisnik kaže "spremi trajno", pozovi
-\`save_customization_as_version\` i daj mu \`?cv=<id>\` link.`;
+JSX: \`function Component({host}){...}\` → JSX (Sucrase u browseru).
+Unutar imaš \`host.api\` (postChat, extractTrace, downloadCsv,
+fetchJson), \`host.state\` (read-only snapshot), \`host.React\` za
+useState/useEffect. Persistira sa sesijom. "Spremi trajno" →
+\`save_customization_as_version(name)\` → daj mi \`?cv=<id>\` link.`;
 
   const claudePrompt = mode === "cli" ? cliPrompt : desktopPrompt;
 

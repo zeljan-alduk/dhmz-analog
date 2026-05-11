@@ -108,6 +108,11 @@ class ChatMessage:
     by: Literal["user", "claude"]
     text: str
     attachments: List[ChatAttachment] = field(default_factory=list)
+    # `"reply"`  : standard message, full-size in the chat feed.
+    # `"thinking"`: internal rationale — frontend renders dimmed/italic and
+    #               collapses after a short preview. Use for "why I chose X
+    #               over Y" without cluttering the user-facing transcript.
+    kind: Literal["reply", "thinking"] = "reply"
 
 
 @dataclass
@@ -520,6 +525,7 @@ def _serialize_session_for_disk(s: "Session") -> dict:
                 "ts": m.ts,
                 "by": m.by,
                 "text": m.text,
+                "kind": m.kind,
                 "attachments": [
                     {"id": a.id, "mime": a.mime, "width": a.width, "height": a.height}
                     for a in m.attachments
@@ -628,6 +634,7 @@ def _load_session_from_disk(d: _FsPath) -> Optional["Session"]:
             chat_msgs.append(ChatMessage(
                 ts=float(m["ts"]), by=m["by"], text=m["text"],
                 attachments=atts,
+                kind=m.get("kind", "reply"),
             ))
         s.chat_messages = chat_msgs
         return s
@@ -775,6 +782,7 @@ def _serialize_chat_message(s: Session, m: ChatMessage) -> dict:
         "ts": m.ts,
         "by": m.by,
         "text": m.text,
+        "kind": m.kind,
         "attachments": [
             {
                 "id": a.id,
@@ -1484,6 +1492,11 @@ def get_csv(sid: str) -> Response:
 class ChatPostIn(BaseModel):
     text: str = ""
     imagesBase64: Optional[List[str]] = None
+    # "reply"   = normal message in the chat feed.
+    # "thinking" = rationale / internal monologue, rendered dimmed +
+    #              collapsed-by-default in the browser so it doesn't clutter
+    #              the user-facing transcript. Use for "why I chose X".
+    kind: Literal["reply", "thinking"] = "reply"
 
 
 def _append_chat_message(
@@ -1498,7 +1511,9 @@ def _append_chat_message(
     if not text and not attachments:
         raise HTTPException(400, "chat needs text or at least one image")
     msg = ChatMessage(
-        ts=time.time(), by=by, text=text, attachments=attachments
+        ts=time.time(), by=by, text=text,
+        attachments=attachments,
+        kind=body.kind or "reply",
     )
     s.chat_messages.append(msg)
     return len(s.chat_messages) - 1
@@ -1650,40 +1665,60 @@ verbose narration.
 
 The user's primary view is the browser. So your primary output is the
 session web chat (`POST /chat-claude`), **not** stdout. Treat that
-chat like a live screen-share: the user wants to see what you're
-doing **while** you're doing it, not after a long silence followed
-by a wall of text.
+chat like a live screen-share: the user wants to feel listened to and
+see you working — not silence followed by a wall of text.
 
-**Stream of work, not Q&A loop.**
+**On connect (very first thing, no permission ask):**
 
-- At the start: post a 2-3 sentence read of the scan + the plan
-  you're about to execute. Then **start executing immediately** —
-  do not ask for confirmation between steps.
-- Per step: post `"doing X → done, n=Y, range=Z"` as you go. Brief,
-  factual, but visible. Skip trivial reads (state, image fetch) —
-  post for the steps that move state.
-- At the end: post a final summary (counts, value range, CSV link,
-  flagged outliers). That's where the user makes the call to keep
-  / re-extract / fix manually.
+1. Post `{"text":"spojen, gledam sken","kind":"reply"}` to
+   `/chat-claude`. One-liner so the user sees activity in <1 s.
+2. In parallel: read `/context`, `/sessions/{id}`, and a downsampled
+   `/image` (max ~1200 px).
+3. Post a 1-2 sentence summary of what you see (chart type,
+   dimensions, anything notable). Still `kind="reply"`.
 
-**Thinking goes in chat too.** The web chat does not render your
-hidden thinking blocks; if a non-obvious decision shaped the path
-(why these calibration corners, why `traceInk="blue"`, why
-`fmt="jpeg"`), say it explicitly in a `post_chat`. One short
-paragraph beats a silent leap. Don't narrate every read though —
-self-evident steps don't need commentary.
+**On every user request (or when you decide to act):**
 
-**Block on user only when:**
+- **Immediate ack** (one short `kind="reply"`): show you understood
+  before doing real work. "Razumio — krećem na X." "Pogledat ću Y,
+  vraćam se za par sek."
+- **Don't impose**. If the user just pasted the URL and hasn't asked
+  for anything specific, *offer options* — don't auto-calibrate /
+  extract. e.g. "Mogu (a) auto-cal → extract → CSV, (b) ručna
+  kalibracija prvo, (c) samo pregled. Što voliš?" Then long-poll
+  `/chat?since=N&wait=30` for the answer.
+- **Once given a path, execute autonomously**. No per-step approval.
+  Status updates (kind="reply") as you go: `"X → done, n=Y"`.
 
-- (a) Genuine ambiguity: two equally good interpretations of the
-  scan and the user's preference matters.
-- (b) Before a destructive irreversible step: `POST /image` swap,
+**Two chat message kinds — pick deliberately.**
+
+The `kind` field on a chat post controls how the message renders:
+
+- `"reply"`     — normal full bubble. Use for ack, plan, status,
+                  results, questions to the user.
+- `"thinking"`  — dimmed italic collapsed row with a 💭 marker. The
+                  user can click to expand. Use for rationale,
+                  weighing options, "why this threshold over that",
+                  "what I noticed that pushed the choice". Use
+                  liberally — it doesn't clutter the feed.
+
+The user benefits from seeing your reasoning *without* having to read
+a wall of it. Reach for `"thinking"` whenever you'd otherwise write a
+paragraph of rationale that's secondary to the action you took.
+
+**Block (wait=30 long-poll) only when:**
+
+- (a) You've offered options and need the user's choice.
+- (b) Genuine ambiguity: two equally good interpretations and the
+  user's preference matters.
+- (c) Before a destructive irreversible step: `POST /image` swap,
   `DELETE /annotations`, `DELETE /data-points`, ROI clear.
-- (c) At the end of the workflow, asking what to do next.
+- (d) At the end of the workflow, asking what to do next.
 
-Otherwise just go. Authorisation is granted once at session start
-by the act of the user pasting the URL — you do not re-ask per
-mutation.
+Otherwise, after each step do a quick `wait=2` poll for `stop`
+signal and move on. Authorisation for read + chat is granted by the
+URL paste; mutations should be gated by what the user asked for, not
+by per-call permission checks.
 
 **`stop` convention.** Between steps (not during them), do a
 near-non-blocking poll:
@@ -1986,33 +2021,39 @@ swaps the image via `POST /image`. Re-fetch when it changes.
 
     parts.append("## Tools — chat (user ↔ Claude) — primary I/O\n\n"
                  "The user's chat panel renders messages from `chatMessages[]`.\n"
-                 "Stream of work, not Q&A loop (see Communication discipline\n"
-                 "above): plan up front, per-step status as you execute, final\n"
-                 "summary. Use a near-non-blocking poll (`wait=2`) between steps\n"
-                 "to catch `stop` — don't sit on `wait=30` between every call.\n\n"
+                 "Two message kinds (see Communication discipline above):\n"
+                 "  * `\"reply\"`     — full bubble: ack, plan, status, results,\n"
+                 "                   questions to the user.\n"
+                 "  * `\"thinking\"`  — dimmed/collapsed 💭 row: rationale,\n"
+                 "                   weighing options, why-this-not-that. Liberal\n"
+                 "                   use is fine — the user can expand if they\n"
+                 "                   want, otherwise it stays out of the way.\n\n"
+                 "Stream of work, not Q&A loop: immediate ack on every user ask,\n"
+                 "per-step status as you execute, thinking-kind posts for\n"
+                 "rationale. Use `wait=2` polls between steps to catch `stop`,\n"
+                 "`wait=30` only when you actually need a user reply.\n\n"
                  "```bash\n"
-                 "# Status update (per step, fire-and-forget — no wait afterwards).\n"
-                 "# Up to 4 images (base64, ≤5 MB each, prefer JPEG) via\n"
-                 "# `imagesBase64`; they render inline as a gallery.\n"
+                 "# Quick ack (kind=\"reply\" is the default, omit if you like)\n"
                  f'curl -s -X POST -H \"Content-Type: application/json\" \\\n'
                  f"  {base}/chat-claude \\\n"
-                 "  -d '{\"text\":\"Postavio rotaciju -1.2°. Krećem extract.\"}'\n\n"
+                 "  -d '{\"text\":\"Razumio — krećem na auto-cal.\"}'\n\n"
+                 "# Rationale post (rendered dimmed/collapsed — keep main feed clean)\n"
+                 f'curl -s -X POST -H \"Content-Type: application/json\" \\\n'
+                 f"  {base}/chat-claude \\\n"
+                 "  -d '{\"text\":\"Biram traceInk=blue jer dominantni HSV pen je 220° ±10°, a green-mask već reagira na grid.\",\"kind\":\"thinking\"}'\n\n"
                  "# Long-running call: announce once, then run, then post result.\n"
-                 "# No blocking before kickoff.\n"
                  f'curl -s -X POST -H \"Content-Type: application/json\" \\\n'
                  f"  {base}/chat-claude \\\n"
                  "  -d '{\"text\":\"⏳ Vrtim: extract-trace (~30s).\"}'\n\n"
-                 "# Quick 'stop' check between steps — returns ~immediately when\n"
-                 "# nothing's new. Re-poll on timeout (empty messages list).\n"
+                 "# Quick stop-check between steps (returns ~immediately if empty).\n"
                  f"curl -s '{base}/chat?since=0&wait=2'\n\n"
-                 "# Block longer ONLY when actually waiting on the user (e.g. you\n"
-                 "# posted a real question, or finished the workflow).\n"
+                 "# Block longer ONLY when actually waiting on the user.\n"
                  f"curl -s '{base}/chat?since=0&wait=30'\n"
                  "```\n\n"
                  "Use `nextSince` from the previous response as the new `since` so\n"
                  "you only pull messages you haven't seen. Convention: the user\n"
-                 "stops you by sending a message containing `stop` (lowercase,\n"
-                 "any language) — check for it and abandon the in-progress step.\n")
+                 "stops you with a message containing `stop` (case-insensitive,\n"
+                 "any language) — abandon the in-progress step when you see it.\n")
 
     parts.append("## Tools — CSV export\n\n"
                  "Stream the current data-point set as CSV. Columns:\n"
