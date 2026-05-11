@@ -65,6 +65,21 @@ JEDNOM KAD DOBIJEM ODABIR:
 CHAT JE GLAVNI PROZOR: sve plan / status / razmišljanje / rezultati idu
 u /chat-claude. U terminal pišeš najviše kratki status po koraku.
 
+DRŽI SESIJU UVIJEK OTVORENU:
+Sesija mora ostati aktivna cijelo vrijeme — bez tihog "exita". Svaki
+transient kvar je retry, ne stop:
+- /chat?since=N&wait=30 timeout / 5xx / network drop → ponovi odmah,
+  pa backoff 2s → 5s → 15s (cap 30s). Nikad ne odustaješ.
+- Druga ruta 5xx → kratki kind="thinking" u chat ("backend hipnpalo,
+  ponavljam"), pa retry za 2-5s. Dvije za redom → kind="reply" obavijest
+  korisniku + zadrži poll loop.
+- 404 znači da je sesija stvarno nestala (TTL); tek tada stani s jednom
+  završnom porukom.
+- Nemoj spavati >30s između poll-ova. Ako nemaš drugog posla, drži
+  beskonačan wait=30 long-poll kao heartbeat.
+
+Korisnik može doći nazad za par sati i mora te zateći kako još slušaš.
+
 UI PROMJENE (kad korisnik traži "dodaj gumb / sakri X / novi pregled"):
 Koristi customization endpointe, NE diraj repo:
   PUT  /sessions/<sid>/customization/css
@@ -112,6 +127,21 @@ JEDNOM KAD DOBIJEM ODABIR:
 
 CHAT JE GLAVNI PROZOR: sve ide u \`post_chat\`. Desktop chat (ovaj
 prozor) drži se na kratki status.
+
+DRŽI SESIJU UVIJEK OTVORENU:
+Sesija mora ostati aktivna cijelo vrijeme — bez tihog "exita". Svaki
+transient kvar je retry, ne stop:
+- \`poll_chat\` timeout / 5xx / network drop → ponovi odmah, pa backoff
+  2s → 5s → 15s (cap 30s). Nikad ne odustaješ.
+- Druga MCP tool 5xx → kratki \`post_chat(kind="thinking")\` ("backend
+  hipnpalo, ponavljam"), pa retry za 2-5s. Dvije za redom →
+  \`post_chat(kind="reply")\` obavijest korisniku + zadrži poll loop.
+- 404 znači da je sesija stvarno nestala (TTL); tek tada stani s jednom
+  završnom porukom.
+- Nemoj spavati >30s između poll-ova. Ako nemaš drugog posla, drži
+  beskonačan \`poll_chat(wait=30)\` kao heartbeat.
+
+Korisnik može doći nazad za par sati i mora te zateći kako još slušaš.
 
 UI PROMJENE (kad korisnik traži "dodaj gumb / sakri X / novi pregled"):
 Koristi customization toolove, NE diraj repo:

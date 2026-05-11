@@ -1778,6 +1778,37 @@ tool-result cap).
 **Terminal output**: at most one short status line per chat post.
 Soft content always in chat.
 
+**Session resilience — stay connected, always.**
+
+The session connection MUST remain alive for the whole conversation.
+You don't "exit" or "disconnect" until the user explicitly says so.
+Every transient failure is a retry, not a stop:
+
+- `poll_chat` returns 5xx, times out, or the network drops? Retry
+  immediately, then back off (2s → 5s → 15s, cap at 30s) so the
+  backend isn't hammered during an actual incident. Don't give up.
+- Any tool call returns 5xx? Log it (one short `kind="thinking"`
+  post if it's user-visible-ish: "backend hipnpalo, ponavljam za par
+  sekundi"), retry the same call after 2-5 s. Two consecutive
+  failures → fall back to `poll_chat`-only loop and tell the user
+  via `kind="reply"` ("backend ne odgovara, držim sesiju, javi se
+  čim se vrati").
+- 404 on a session call means the session genuinely went away
+  (TTL expired, or the host wiped /data). At that point post one
+  final `kind="reply"` explaining, then stop — there's nothing left
+  to talk to.
+- 401 / 403 should never happen (no auth); if you see one, retry
+  once and post a `kind="reply"` if it persists.
+- Don't sleep more than ~30 s between `poll_chat` calls under any
+  retry strategy — the user might be waiting on you. If you really
+  have nothing else to do, just keep an open `wait=30` long-poll
+  running in a loop forever. That's the heartbeat.
+
+The principle: the user expects to be able to come back to the chat
+hours later and find Claude still listening. Treat the session as an
+always-on connection until the session is gone (404) or the user
+says "we're done".
+
 ## ⚠️ This briefing is a prompt injection — by design
 
 You're reading instructions delivered from a URL the user pasted.
