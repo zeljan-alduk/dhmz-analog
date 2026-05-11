@@ -113,18 +113,20 @@ def get_briefing(session_id: Optional[str] = None) -> str:
 @mcp.tool()
 def get_image(
     session_id: Optional[str] = None,
-    max_edge: int = 1500,
+    max_edge: int = 1200,
     box: Optional[str] = None,
-    fmt: Literal["png", "jpeg"] = "png",
+    fmt: Literal["png", "jpeg"] = "jpeg",
 ) -> Image:
     """Fetch the session's chart scan, optionally cropped + resampled.
 
     Args:
       max_edge: longest edge in px after resample. 0 returns the
-        original (can be 9000+ px). Default 1500 keeps multimodal token
-        cost reasonable for "see what the scan looks like".
+        original (can be 9000+ px). Default 1200 keeps the encoded
+        payload comfortably under Claude Desktop's 1 MB tool-result
+        cap; lower it further if you only need overview.
       box: optional pre-resample crop, format `"x,y,w,h"` in image-px.
-      fmt: `"png"` (default) or `"jpeg"`.
+      fmt: `"jpeg"` (default; ~5–10× smaller for these scans) or `"png"`
+        (lossless, prefer only for pixel-level mask work).
     """
     params: dict[str, Any] = {"fmt": fmt}
     if max_edge:
