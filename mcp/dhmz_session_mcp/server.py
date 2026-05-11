@@ -144,6 +144,28 @@ def get_csv(session_id: Optional[str] = None) -> str:
     return r.text
 
 
+@mcp.tool()
+def get_chat_attachment(
+    attachment_id: str,
+    session_id: Optional[str] = None,
+) -> Image:
+    """Fetch a chat attachment by id.
+
+    When the user pastes / uploads an image into the session web chat
+    panel, it appears in subsequent `poll_chat` results as
+    `{id, mime, width, height, url}` metadata. Use this tool to load
+    the actual image bytes so you can read them multimodally — the
+    `url` returned in the metadata is a backend path, not data you
+    can interpret directly.
+    """
+    r = _check(_client.get(
+        _url(_sid(session_id), f"/chat-attachments/{attachment_id}")
+    ))
+    ctype = r.headers.get("content-type", "")
+    fmt = "jpeg" if "jpeg" in ctype else "png"
+    return Image(data=r.content, format=fmt)
+
+
 # ─── Calibration / rotation / polylines / image swap ─────────────────────
 @mcp.tool()
 def set_rotation(deg: float, session_id: Optional[str] = None) -> dict:

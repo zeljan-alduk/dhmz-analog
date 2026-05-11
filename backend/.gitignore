@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# Persistent session store created by docker-compose bind-mount (./data:/data).
+# State files: data/sessions/<sid>/{state.json, image_<rev>.<fmt>, attach/...}
+data/

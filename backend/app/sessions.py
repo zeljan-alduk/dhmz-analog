@@ -15,12 +15,15 @@ import base64
 import binascii
 import json
 import logging
+import os
 import secrets
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path as _FsPath
 from typing import Annotated, List, Literal, Optional
 
 import numpy as np
@@ -149,6 +152,7 @@ class Session:
             self.notes.append(SessionNote(time.time(), note_text, by))
             if len(self.notes) > MAX_NOTES:
                 self.notes = self.notes[-MAX_NOTES:]
+        _persist_session(self)
 
     def is_expired(self) -> bool:
         return time.time() > self.expires_at
@@ -188,6 +192,10 @@ class SessionStore:
         ))
         with self._lock:
             self._sessions[sid] = s
+        # Persist immediately so the session survives a restart even before
+        # the first mutation lands. `bump()` will keep state.json refreshed
+        # afterwards.
+        _persist_session(s)
         return s
 
     def get(self, sid: str) -> Optional[Session]:
@@ -205,6 +213,7 @@ class SessionStore:
             expired = [sid for sid, s in self._sessions.items() if s.is_expired()]
             for sid in expired:
                 del self._sessions[sid]
+                _rm_session_dir(sid)
             return len(expired)
 
 
@@ -429,6 +438,227 @@ def _require(sid: str) -> Session:
     if s is None:
         raise HTTPException(404, "session not found or expired")
     return s
+
+
+# ─── Disk persistence ───────────────────────────────────────────────────
+# Sessions survive backend restart / redeploy by writing state to a host
+# volume. One subdirectory per session id contains:
+#   state.json           — everything except image and attachment bytes
+#   image_<rev>.<fmt>    — original scan, one file per image_revision
+#   attach/<aid>.<ext>   — chat-attachment payloads
+# Atomic via tmp-write + rename. Per-session writes are guarded by
+# SessionStore's RLock indirectly (mutations hold no lock, but only one
+# uvicorn worker runs — see docker-compose --workers 1).
+
+DATA_DIR = _FsPath(os.environ.get("DHMZ_DATA_DIR", "/data")) / "sessions"
+
+
+def _ext_for_mime(mime: str) -> str:
+    return "jpg" if "jpeg" in (mime or "") else "png"
+
+
+def _session_dir(sid: str) -> _FsPath:
+    return DATA_DIR / sid
+
+
+def _atomic_write(path: _FsPath, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def _serialize_session_for_disk(s: "Session") -> dict:
+    """JSON-shape for state.json — everything except raw image / attachment bytes."""
+    return {
+        "id": s.id,
+        "created_at": s.created_at,
+        "expires_at": s.expires_at,
+        "chart_type": s.chart_type,
+        "config": s.config,
+        "rotation_deg": s.rotation_deg,
+        "image_format": s.image_format,
+        "image_natural_w": s.image_natural_w,
+        "image_natural_h": s.image_natural_h,
+        "image_revision": s.image_revision,
+        "version": s.version,
+        "calibration": [
+            {"imgX": p.imgX, "imgY": p.imgY, "chartX": p.chartX, "chartY": p.chartY}
+            for p in s.calibration
+        ],
+        "polylines": [
+            {"points": p.points, "axis": p.axis, "weight": p.weight}
+            for p in s.polylines
+        ],
+        "data_points": [
+            {
+                "day": p.day, "hour": p.hour, "value": p.value,
+                "canvasX": p.canvasX, "canvasY": p.canvasY,
+                "source": p.source,
+            }
+            for p in s.data_points
+        ],
+        "annotations": list(s.annotations),
+        "rois": list(s.rois),
+        "panels": dict(s.panels),
+        "scratch_html": (
+            {"html": s.scratch_html.html,
+             "css": s.scratch_html.css,
+             "js": s.scratch_html.js}
+            if s.scratch_html else None
+        ),
+        "notes": [{"ts": n.ts, "text": n.text, "by": n.by} for n in s.notes],
+        "chat_messages": [
+            {
+                "ts": m.ts,
+                "by": m.by,
+                "text": m.text,
+                "attachments": [
+                    {"id": a.id, "mime": a.mime, "width": a.width, "height": a.height}
+                    for a in m.attachments
+                ],
+            }
+            for m in s.chat_messages
+        ],
+    }
+
+
+def _persist_session(s: "Session") -> None:
+    """Write a session to disk. Called from Session.bump() after every
+    state-changing endpoint. Idempotent for image / attachment files
+    (writes only if missing). Errors are logged, never raised — a
+    persistence failure must not break the live request.
+    """
+    try:
+        d = _session_dir(s.id)
+        d.mkdir(parents=True, exist_ok=True)
+        # Image bytes for current revision (write once per revision).
+        img_path = d / f"image_{s.image_revision}.{s.image_format}"
+        if not img_path.exists():
+            _atomic_write(img_path, s.image_bytes)
+        # Chat attachments — only the missing ones (existence check is cheap).
+        for m in s.chat_messages:
+            for a in m.attachments:
+                ap = d / "attach" / f"{a.id}.{_ext_for_mime(a.mime)}"
+                if not ap.exists():
+                    _atomic_write(ap, a.data)
+        # State — always rewrite.
+        payload = json.dumps(_serialize_session_for_disk(s), indent=2, default=str)
+        _atomic_write(d / "state.json", payload.encode("utf-8"))
+    except Exception as e:
+        log.error("persist failed sid=%s: %s", s.id, e, exc_info=True)
+
+
+def _load_session_from_disk(d: _FsPath) -> Optional["Session"]:
+    """Read one session directory back into a Session object. Returns
+    None for expired or malformed entries (caller is expected to rmtree)."""
+    try:
+        state = json.loads((d / "state.json").read_bytes())
+        if float(state.get("expires_at", 0)) < time.time():
+            return None
+        fmt = state["image_format"]
+        rev = int(state.get("image_revision", 0))
+        img_bytes = (d / f"image_{rev}.{fmt}").read_bytes()
+        s = Session(
+            id=state["id"],
+            created_at=float(state["created_at"]),
+            expires_at=float(state["expires_at"]),
+            chart_type=state["chart_type"],
+            config=state["config"],
+            image_bytes=img_bytes,
+            image_format=fmt,
+            image_natural_w=int(state["image_natural_w"]),
+            image_natural_h=int(state["image_natural_h"]),
+            image_revision=rev,
+            rotation_deg=float(state.get("rotation_deg", 0.0)),
+            version=int(state.get("version", 0)),
+        )
+        s.calibration = [
+            CalibrationPointModel(
+                imgX=c["imgX"], imgY=c["imgY"],
+                chartX=c["chartX"], chartY=c["chartY"],
+            )
+            for c in state.get("calibration", [])
+        ]
+        s.polylines = [
+            VectorPolylineModel(
+                points=p["points"], axis=p["axis"], weight=p["weight"],
+            )
+            for p in state.get("polylines", [])
+        ]
+        s.data_points = [
+            DataPointModel(
+                day=int(p["day"]), hour=float(p["hour"]), value=float(p["value"]),
+                canvasX=p.get("canvasX"), canvasY=p.get("canvasY"),
+                source=p["source"],
+            )
+            for p in state.get("data_points", [])
+        ]
+        s.annotations = list(state.get("annotations", []))
+        s.rois = list(state.get("rois", []))
+        s.panels = dict(state.get("panels", {}))
+        sh = state.get("scratch_html")
+        s.scratch_html = (
+            ScratchHTML(html=sh["html"], css=sh.get("css"), js=sh.get("js"))
+            if sh else None
+        )
+        s.notes = [
+            SessionNote(ts=float(n["ts"]), text=n["text"], by=n["by"])
+            for n in state.get("notes", [])
+        ]
+        chat_msgs: List[ChatMessage] = []
+        for m in state.get("chat_messages", []):
+            atts: List[ChatAttachment] = []
+            for am in m.get("attachments", []):
+                ap = d / "attach" / f"{am['id']}.{_ext_for_mime(am['mime'])}"
+                if ap.exists():
+                    atts.append(ChatAttachment(
+                        id=am["id"], mime=am["mime"],
+                        width=int(am["width"]), height=int(am["height"]),
+                        data=ap.read_bytes(),
+                    ))
+            chat_msgs.append(ChatMessage(
+                ts=float(m["ts"]), by=m["by"], text=m["text"],
+                attachments=atts,
+            ))
+        s.chat_messages = chat_msgs
+        return s
+    except Exception as e:
+        log.error("load failed dir=%s: %s", d, e, exc_info=True)
+        return None
+
+
+def load_all_sessions() -> int:
+    """Walk DATA_DIR at startup, populate STORE with non-expired sessions,
+    rmtree the rest. Returns count loaded."""
+    if not DATA_DIR.exists():
+        log.info("sessions: no data dir at %s — starting fresh", DATA_DIR)
+        return 0
+    loaded = 0
+    for d in DATA_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        s = _load_session_from_disk(d)
+        if s is None:
+            try:
+                shutil.rmtree(d)
+                log.info("sessions: removed expired/malformed %s", d.name)
+            except Exception as e:
+                log.warning("could not rm %s: %s", d, e)
+            continue
+        STORE._sessions[s.id] = s  # bypass create()/lock — startup is single-threaded
+        loaded += 1
+    log.info("sessions: loaded %d from %s", loaded, DATA_DIR)
+    return loaded
+
+
+def _rm_session_dir(sid: str) -> None:
+    try:
+        d = _session_dir(sid)
+        if d.exists():
+            shutil.rmtree(d)
+    except Exception as e:
+        log.warning("rm session dir failed sid=%s: %s", sid, e)
 
 
 # ─── Image resample / chat-attachment helpers ───────────────────────────

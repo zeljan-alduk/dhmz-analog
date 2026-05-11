@@ -18,7 +18,11 @@ from .grid_align import (
     VectorizeGridResponse,
     vectorize_grid,
 )
-from .sessions import router as sessions_router, cleanup_loop as sessions_cleanup_loop
+from .sessions import (
+    router as sessions_router,
+    cleanup_loop as sessions_cleanup_loop,
+    load_all_sessions,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("dhmz")
@@ -29,6 +33,8 @@ app.include_router(sessions_router, prefix="/api")
 
 @app.on_event("startup")
 async def _start_session_cleanup() -> None:
+    # Re-hydrate sessions from disk first so any in-flight long-polls reconnect.
+    load_all_sessions()
     app.state._sessions_cleanup_task = asyncio.create_task(sessions_cleanup_loop())
 
 

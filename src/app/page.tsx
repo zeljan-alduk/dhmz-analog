@@ -176,6 +176,10 @@ export default function Home() {
   // SessionBanner modal is shown so the user can hand the URL to Claude.
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
   const [sessionBannerOpen, setSessionBannerOpen] = useState(false);
+  // True from the moment we start POST /api/sessions until we get a
+  // response (or fail). Drives the small "preparing session" pill so the
+  // user has visible feedback during the multi-second base64 upload.
+  const [sessionCreating, setSessionCreating] = useState(false);
   // Rotation in degrees — combined coarse (90° buttons) and fine (slider).
   const [rotationAngle, setRotationAngle] = useState(0);
   // Derived: previewSourceUrl rotated by rotationAngle. Used for display in
@@ -789,6 +793,7 @@ export default function Home() {
   };
 
   const createSessionForUpload = async (file: File, type: ChartType) => {
+    setSessionCreating(true);
     try {
       const cfg = CHART_CONFIGS[type];
       const blob = file;
@@ -830,6 +835,8 @@ export default function Home() {
       setSessionBannerOpen(true);
     } catch (e) {
       console.warn("session create error", e);
+    } finally {
+      setSessionCreating(false);
     }
   };
 
@@ -2076,6 +2083,34 @@ export default function Home() {
           info={sessionInfo}
           onDismiss={() => setSessionBannerOpen(false)}
         />
+      )}
+      {(sessionCreating || (sessionInfo && !sessionBannerOpen)) && (
+        <button
+          type="button"
+          onClick={() => {
+            if (sessionInfo) setSessionBannerOpen(true);
+          }}
+          disabled={sessionCreating}
+          aria-live="polite"
+          className="fixed top-3 right-3 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/95 backdrop-blur shadow-lg border border-neutral-200 text-xs font-medium text-neutral-800 hover:bg-white transition-colors disabled:cursor-default"
+          title={
+            sessionCreating
+              ? "Pripremam Claude session URL…"
+              : "Otvori session URL za Claude"
+          }
+        >
+          {sessionCreating ? (
+            <>
+              <span className="inline-block w-3 h-3 border-2 border-neutral-300 border-t-neutral-700 rounded-full animate-spin" />
+              <span>Pripremam Claude session…</span>
+            </>
+          ) : (
+            <>
+              <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.6)]" />
+              <span>Sesija spremna ↗</span>
+            </>
+          )}
+        </button>
       )}
     </div>
   );
