@@ -14,14 +14,20 @@ export function SessionBanner({
   info,
   onDismiss,
 }: {
-  info: SessionInfo;
+  info: SessionInfo | null;
   onDismiss: () => void;
 }) {
   const [copied, setCopied] = useState<"url" | "prompt" | null>(null);
 
   const [mode, setMode] = useState<"cli" | "desktop">("cli");
 
-  const cliPrompt = `${info.url} — pomozi mi digitalizirati ovaj sken.
+  const isLoading = info === null;
+  // Stable strings so we can compute the prompt text without a guard; while
+  // loading these are empty and the prompt block renders a spinner instead.
+  const sessionUrl = info?.url ?? "";
+  const sessionId = info?.id ?? "";
+
+  const cliPrompt = `${sessionUrl} — pomozi mi digitalizirati ovaj sken.
 
 KOMUNIKACIJSKI STIL:
 
@@ -71,7 +77,7 @@ JSX mora definirati top-level Component({host}) → JSX. Sucrase
 compila u browseru (instant); persistira sa sesijom; korisnik moze
 save_customization-irati za trajno + share-link.`;
 
-  const desktopPrompt = `Pomozi mi digitalizirati session ${info.id} (URL: ${info.url}).
+  const desktopPrompt = `Pomozi mi digitalizirati session ${sessionId} (URL: ${sessionUrl}).
 Spojen si preko \`dhmz\` MCP servera — koristi te toolove, ne curl.
 
 KOMUNIKACIJSKI STIL:
@@ -149,13 +155,14 @@ Persistira sa sesijom; ako korisnik kaže "spremi trajno", pozovi
     return () => window.removeEventListener("keydown", onKey);
   }, [onDismiss]);
 
-  const remainingSec = Math.max(0, info.expiresAt - Date.now() / 1000);
-  const ttlLabel =
-    remainingSec >= 36 * 3600
-      ? `~${Math.round(remainingSec / 3600)} h`
-      : remainingSec >= 90 * 60
-      ? `~${(remainingSec / 3600).toFixed(1)} h`
-      : `~${Math.floor(remainingSec / 60)} min`;
+  const remainingSec = Math.max(0, (info?.expiresAt ?? 0) - Date.now() / 1000);
+  const ttlLabel = isLoading
+    ? "—"
+    : remainingSec >= 36 * 3600
+    ? `~${Math.round(remainingSec / 3600)} h`
+    : remainingSec >= 90 * 60
+    ? `~${(remainingSec / 3600).toFixed(1)} h`
+    : `~${Math.floor(remainingSec / 60)} min`;
 
   return (
     <div
@@ -163,16 +170,23 @@ Persistira sa sesijom; ako korisnik kaže "spremi trajno", pozovi
       onClick={onDismiss}
     >
       <div
-        className="w-full max-w-xl rounded-xl bg-white shadow-2xl border border-neutral-200 overflow-hidden"
+        className="w-full max-w-xl max-h-[88vh] rounded-xl bg-white shadow-2xl border border-neutral-200 overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
       >
-        <header className="flex items-center justify-between px-5 py-3 border-b border-neutral-200 bg-neutral-50">
+        <header className="flex items-center justify-between px-5 py-3 border-b border-neutral-200 bg-neutral-50 shrink-0">
           <div className="flex items-center gap-2">
-            <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]" />
+            {isLoading ? (
+              <span
+                className="inline-block w-3 h-3 border-2 border-neutral-300 border-t-neutral-700 rounded-full animate-spin"
+                aria-hidden="true"
+              />
+            ) : (
+              <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]" />
+            )}
             <h2 className="text-sm font-semibold text-neutral-900">
-              Sesija je spremna za Claude
+              {isLoading ? "Pripremam sesiju za Claude…" : "Sesija je spremna za Claude"}
             </h2>
           </div>
           <button
@@ -185,7 +199,7 @@ Persistira sa sesijom; ako korisnik kaže "spremi trajno", pozovi
           </button>
         </header>
 
-        <div className="p-5 space-y-5">
+        <div className="p-5 space-y-5 overflow-y-auto flex-1 min-h-0">
           <p className="text-sm text-neutral-700 leading-relaxed">
             Sken je pripremljen kao session koju može voditi Claude. Možeš
             mu prosliještiti URL u <strong>terminalu</strong> (Claude Code)
@@ -205,71 +219,90 @@ Persistira sa sesijom; ako korisnik kaže "spremi trajno", pozovi
             ). Njegov rad pratiš uživo u session view-u.
           </p>
 
-          <CopyBlock
-            label="Session URL"
-            value={info.url}
-            copied={copied === "url"}
-            onCopy={() => copy(info.url, "url")}
-          />
-
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[11px] uppercase tracking-wide text-neutral-500 font-semibold">
-                Prompt za Claude
-              </span>
-              <div className="flex gap-1" role="tablist" aria-label="Claude engine">
-                {([
-                  { id: "cli", label: "Terminal" },
-                  { id: "desktop", label: "Desktop" },
-                ] as const).map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={mode === t.id}
-                    onClick={() => setMode(t.id)}
-                    className={cn(
-                      "text-[11px] px-2 py-0.5 rounded border font-medium transition-colors",
-                      mode === t.id
-                        ? "bg-neutral-900 text-white border-neutral-900"
-                        : "bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-100"
-                    )}
-                  >
-                    {t.label}
-                  </button>
-                ))}
+          {isLoading ? (
+            <div className="space-y-2">
+              <div className="text-[11px] uppercase tracking-wide text-neutral-500 font-semibold">
+                Session URL
+              </div>
+              <div className="bg-neutral-50 border border-neutral-200 rounded px-3 py-6 flex items-center justify-center gap-3 text-sm text-neutral-500">
+                <span className="inline-block w-4 h-4 border-2 border-neutral-300 border-t-neutral-700 rounded-full animate-spin" />
+                <span>Generiram URL i prompt…</span>
               </div>
             </div>
-            <CopyBlock
-              label=""
-              multiline
-              value={claudePrompt}
-              copied={copied === "prompt"}
-              onCopy={() => copy(claudePrompt, "prompt")}
-            />
-          </div>
+          ) : (
+            <>
+              <CopyBlock
+                label="Session URL"
+                value={sessionUrl}
+                copied={copied === "url"}
+                onCopy={() => copy(sessionUrl, "url")}
+              />
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[11px] uppercase tracking-wide text-neutral-500 font-semibold">
+                    Prompt za Claude
+                  </span>
+                  <div className="flex gap-1" role="tablist" aria-label="Claude engine">
+                    {([
+                      { id: "cli", label: "Terminal" },
+                      { id: "desktop", label: "Desktop" },
+                    ] as const).map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={mode === t.id}
+                        onClick={() => setMode(t.id)}
+                        className={cn(
+                          "text-[11px] px-2 py-0.5 rounded border font-medium transition-colors",
+                          mode === t.id
+                            ? "bg-neutral-900 text-white border-neutral-900"
+                            : "bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-100"
+                        )}
+                      >
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <CopyBlock
+                  label=""
+                  multiline
+                  value={claudePrompt}
+                  copied={copied === "prompt"}
+                  onCopy={() => copy(claudePrompt, "prompt")}
+                  scrollable
+                />
+              </div>
+            </>
+          )}
 
           <div className="text-[11px] text-neutral-500 leading-relaxed flex items-center gap-3">
             <span>Sesija istječe za {ttlLabel}.</span>
-            <span className="font-mono">{info.id}</span>
+            {!isLoading && <span className="font-mono">{sessionId}</span>}
           </div>
         </div>
 
-        <footer className="flex items-center justify-between px-5 py-3 border-t border-neutral-200 bg-neutral-50">
-          <a
-            href={info.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-xs text-blue-600 hover:underline font-medium"
-          >
-            Otvori session view ↗
-          </a>
+        <footer className="flex items-center justify-between px-5 py-3 border-t border-neutral-200 bg-neutral-50 shrink-0">
+          {isLoading ? (
+            <span className="text-xs text-neutral-400">Otvori session view ↗</span>
+          ) : (
+            <a
+              href={sessionUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-blue-600 hover:underline font-medium"
+            >
+              Otvori session view ↗
+            </a>
+          )}
           <button
             type="button"
             onClick={onDismiss}
             className="px-3 py-1.5 rounded text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-700"
           >
-            Nastavi sam
+            {isLoading ? "Zatvori" : "Nastavi sam"}
           </button>
         </footer>
       </div>
@@ -283,12 +316,16 @@ function CopyBlock({
   multiline,
   copied,
   onCopy,
+  scrollable,
 }: {
   label: string;
   value: string;
   multiline?: boolean;
   copied: boolean;
   onCopy: () => void;
+  /** When true and the content overflows ~16rem, the <code> block scrolls
+   *  internally instead of pushing the modal taller. */
+  scrollable?: boolean;
 }) {
   return (
     <div>
@@ -319,7 +356,8 @@ function CopyBlock({
       <code
         className={cn(
           "block bg-neutral-100 border border-neutral-200 rounded px-3 py-2 text-[12px] font-mono text-neutral-900 break-all",
-          multiline && "whitespace-pre-wrap"
+          multiline && "whitespace-pre-wrap",
+          scrollable && "max-h-64 overflow-y-auto"
         )}
       >
         {value}

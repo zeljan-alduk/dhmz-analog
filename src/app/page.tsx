@@ -794,6 +794,11 @@ export default function Home() {
 
   const createSessionForUpload = async (file: File, type: ChartType) => {
     setSessionCreating(true);
+    // Open the dialog immediately so the user sees a spinner / explanation
+    // while the multi-second upload chugs. Banner internally handles the
+    // info=null loading state.
+    setSessionInfo(null);
+    setSessionBannerOpen(true);
     try {
       const cfg = CHART_CONFIGS[type];
       const blob = file;
@@ -2078,13 +2083,13 @@ export default function Home() {
           </div>
         )}
       </main>
-      {sessionInfo && sessionBannerOpen && (
+      {sessionBannerOpen && (
         <SessionBanner
           info={sessionInfo}
           onDismiss={() => setSessionBannerOpen(false)}
         />
       )}
-      {(sessionCreating || (sessionInfo && !sessionBannerOpen)) && (
+      {!sessionBannerOpen && sessionInfo && (
         <button
           type="button"
           onClick={() => {
