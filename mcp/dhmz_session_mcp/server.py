@@ -281,22 +281,32 @@ def apply_customization_from_id(
 @mcp.tool()
 def get_chat_attachment(
     attachment_id: str,
+    max_edge: int = 1200,
+    fmt: Literal["jpeg", "png"] = "jpeg",
     session_id: Optional[str] = None,
 ) -> Image:
-    """Fetch a chat attachment by id.
+    """Fetch a chat attachment by id (resampled by default to stay under
+    Claude Desktop's 1 MB tool-result cap).
 
-    When the user pastes / uploads an image into the session web chat
-    panel, it appears in subsequent `poll_chat` results as
-    `{id, mime, width, height, url}` metadata. Use this tool to load
-    the actual image bytes so you can read them multimodally — the
-    `url` returned in the metadata is a backend path, not data you
-    can interpret directly.
+    When the user pastes / uploads an image into the session web chat,
+    `poll_chat` returns its metadata (`{id, mime, width, height, url}`).
+    Use this tool to load the actual bytes so you can read them
+    multimodally. The `url` in metadata is a backend path; don't try to
+    interpret it directly.
+
+    Args:
+      max_edge: longest edge in px after resample (0 = original; default
+        1200 keeps the encoded payload comfortably under 1 MB even for
+        big screenshots).
+      fmt: `"jpeg"` (default, much smaller) or `"png"` (lossless).
     """
+    params: dict[str, Any] = {"fmt": fmt}
+    if max_edge:
+        params["max"] = max_edge
     r = _check(_client.get(
-        _url(_sid(session_id), f"/chat-attachments/{attachment_id}")
+        _url(_sid(session_id), f"/chat-attachments/{attachment_id}"),
+        params=params,
     ))
-    ctype = r.headers.get("content-type", "")
-    fmt = "jpeg" if "jpeg" in ctype else "png"
     return Image(data=r.content, format=fmt)
 
 

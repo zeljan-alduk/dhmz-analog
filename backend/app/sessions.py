@@ -1553,23 +1553,56 @@ def post_chat_claude(sid: str, body: ChatPostIn) -> dict:
 
 
 @router.get("/sessions/{sid}/chat-attachments/{aid}")
-def get_chat_attachment(sid: str, aid: str) -> Response:
+def get_chat_attachment(
+    sid: str,
+    aid: str,
+    max: int = 0,
+    fmt: Optional[str] = None,
+) -> Response:
+    """Serve a chat attachment. Without query params returns the original
+    bytes. With `max` or `fmt` set, resizes/recompresses on the fly so the
+    MCP `get_chat_attachment` tool can stay under Claude Desktop's 1 MB
+    tool-result cap when the user pasted a big screenshot.
+    """
     s = _require(sid)
+    att = None
     for msg in s.chat_messages:
-        for att in msg.attachments:
-            if att.id == aid:
-                return Response(
-                    content=att.data,
-                    media_type=att.mime,
-                    headers={
-                        "Cache-Control": "private, max-age=86400",
-                        "Content-Disposition": (
-                            f'inline; filename="chat-{aid}.'
-                            f'{"png" if att.mime == "image/png" else "jpg"}"'
-                        ),
-                    },
-                )
-    raise HTTPException(404, "attachment not found")
+        for a in msg.attachments:
+            if a.id == aid:
+                att = a
+                break
+        if att is not None:
+            break
+    if att is None:
+        raise HTTPException(404, "attachment not found")
+
+    out_fmt = (fmt or "").lower() or None
+    if out_fmt and out_fmt not in ("png", "jpeg"):
+        raise HTTPException(400, "fmt must be 'png' or 'jpeg'")
+    if max < 0 or max > RESAMPLE_MAX_EDGE:
+        raise HTTPException(400, f"max must be 0..{RESAMPLE_MAX_EDGE}")
+
+    if max == 0 and out_fmt is None:
+        body = att.data
+        media_type = att.mime
+    else:
+        target_fmt = out_fmt or ("jpeg" if "jpeg" in att.mime else "png")
+        try:
+            body = _resample_image_bytes(att.data, max, None, target_fmt)
+        except Exception as e:
+            log.error("attachment resample failed aid=%s: %s", aid, e)
+            raise HTTPException(500, f"resample failed: {e}")
+        media_type = f"image/{target_fmt}"
+
+    ext = "png" if "png" in media_type else "jpg"
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "Content-Disposition": f'inline; filename="chat-{aid}.{ext}"',
+        },
+    )
 
 
 @router.get("/sessions/{sid}/chat")
