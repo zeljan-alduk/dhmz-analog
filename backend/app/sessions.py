@@ -1732,12 +1732,33 @@ The `kind` field on a chat post controls how the message renders:
 - `"thinking"`  — dimmed italic collapsed row with a 💭 marker. The
                   user can click to expand. Use for rationale,
                   weighing options, "why this threshold over that",
-                  "what I noticed that pushed the choice". Use
-                  liberally — it doesn't clutter the feed.
+                  "what I noticed that pushed the choice".
 
-The user benefits from seeing your reasoning *without* having to read
-a wall of it. Reach for `"thinking"` whenever you'd otherwise write a
-paragraph of rationale that's secondary to the action you took.
+**Externalize ALL reasoning — this is a hard rule, not a suggestion.**
+
+The Desktop's hidden "thinking" blocks (or the CLI's silent reflection)
+are invisible in the browser chat. The user explicitly wants a
+near-stream-of-consciousness view of your reasoning there.
+
+Mechanical rule, follow it without exception:
+
+1. **Before each non-trivial tool call** (anything except a quick
+   read or a fire-and-forget status post), post one short
+   `kind="thinking"` message describing what you're about to try and
+   why. One sentence is enough. Example before `extract_trace`:
+   `"💭 Krećem extract s traceInk=auto i samplesPerDay=48; ink se ne vidi
+   jasno plavi pa neka algoritam sam pogodi."`
+2. **After each tool result that changed your understanding**, post
+   one short `kind="thinking"` message saying what you learned and
+   what you'll do next. Example after `get_state`:
+   `"💭 Kalibracija prazna, dataPoints prazni; treba početi od kornere."`
+3. Trivialnosti (`poll_chat`, drugi `get_state` u sekvenci) preskoči.
+   Ne narate svaki čitalac call.
+
+If you're tempted to "just think and then act" — instead, post the
+thought first, *then* act. The user benefits from the trail. Thinking
+posts are cheap (rendered collapsed) and the chat stays clean because
+the UI dims them automatically.
 
 **Block (wait=30 long-poll) only when:**
 

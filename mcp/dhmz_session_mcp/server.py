@@ -620,19 +620,26 @@ def post_chat(
     the user (per the briefing's "Communication discipline").
 
     Two `kind`s, pick deliberately:
-      * `"reply"`    — normal post: greetings, plan, status updates,
-                       results, questions. Renders full-size in the chat.
-      * `"thinking"` — rationale / internal monologue ("considering X over
-                       Y because…"). Renders dimmed + collapsed-by-default
-                       in the browser so the chat feed stays clean.
+      * `"reply"`    — normal full bubble: greetings, plan, status,
+                       results, questions to the user.
+      * `"thinking"` — dimmed/collapsed row: rationale, weighing options,
+                       "considering X over Y because…". Renders out of the
+                       way in the UI so the chat feed stays readable.
 
-    Use `thinking` liberally for reasoning the user might want to peek at
-    but shouldn't have to read in full; use `reply` for anything the user
-    is supposed to actually act on (questions especially).
+    **Externalize ALL reasoning — hard rule, not a suggestion.** The
+    Desktop's hidden thinking blocks are invisible in the session web
+    chat. The user explicitly wants to see your reasoning trail there.
+
+    Mechanical convention:
+      - Before each non-trivial tool call (anything beyond quick reads),
+        post one short `kind="thinking"` describing intent + why.
+      - After each tool result that changed your understanding, post one
+        short `kind="thinking"` saying what you learned / what's next.
+      - Skip trivial chains (back-to-back state reads, poll_chat polls).
 
     Args:
-      text: ≤4000 chars. Use `⏳ Vrtim: X (~Xs)` convention before any
-        long-running pipeline call.
+      text: ≤4000 chars. For long-running pipeline calls, prefix with
+        `"⏳ Vrtim: X (~Xs)"` so the user sees the spinner-equivalent.
       images: optional ≤4 attachments — filesystem paths or base64 strings.
     """
     body: dict[str, Any] = {"text": text, "kind": kind}
