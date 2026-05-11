@@ -1558,8 +1558,11 @@ def post_chat_claude(sid: str, body: ChatPostIn) -> dict:
     s = _require(sid)
     idx = _append_chat_message(s, "claude", body)
     msg = s.chat_messages[idx]
+    # Use whatever agent label the post carried — keeps the activity feed
+    # model-agnostic ("Codex 5.4 said: …", not always "Claude said: …").
+    speaker = (msg.agent or "Agent").strip() or "Agent"
     s.bump(
-        f"Claude said: {_chat_note_summary(msg.text, len(msg.attachments))}",
+        f"{speaker} said: {_chat_note_summary(msg.text, len(msg.attachments))}",
         by="claude",
     )
     return {"version": s.version, "messageIndex": idx}

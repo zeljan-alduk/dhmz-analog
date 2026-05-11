@@ -1036,6 +1036,19 @@ function ChatSection({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
 
+  // Latest agent label the operator side has self-reported, for placeholder
+  // text. Falls back to "agent" if the session is empty or all entries are
+  // from the user.
+  const latestAgentLabel = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.by === "claude" && m.agent && m.agent.trim()) {
+        return m.agent.trim();
+      }
+    }
+    return "agent";
+  }, [messages]);
+
   // Auto-scroll to bottom when messages arrive
   useEffect(() => {
     const el = scrollRef.current;
@@ -1253,7 +1266,7 @@ function ChatSection({
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={onKey}
           onPaste={onPaste}
-          placeholder="Reply to Claude…   (paste / drop / attach images)"
+          placeholder={`Reply to ${latestAgentLabel}…   (paste / drop / attach images)`}
           rows={2}
           className="flex-1 text-[12px] border border-neutral-200 rounded px-2 py-1.5 resize-none font-sans focus:outline-none focus:border-neutral-400"
           disabled={sending}
@@ -1612,23 +1625,36 @@ function NotesSection({ notes }: { notes: SessionNote[] }) {
         Activity
       </h3>
       <div className="space-y-1 max-h-96 overflow-y-auto pr-1">
-        {recent.map((n, i) => (
-          <div key={i} className="text-[12px] flex gap-2">
-            <span
-              className={cn(
-                "shrink-0 px-1.5 rounded text-[10px] font-mono uppercase tracking-wide text-white leading-relaxed h-fit mt-0.5",
-                n.by === "claude"
-                  ? "bg-purple-500"
-                  : n.by === "user"
-                  ? "bg-blue-500"
-                  : "bg-neutral-400"
-              )}
-            >
-              {n.by}
-            </span>
-            <span className="text-neutral-700 leading-relaxed">{n.text}</span>
-          </div>
-        ))}
+        {recent.map((n, i) => {
+          // Note text often starts with "<Brand X.Y> said: …" when it came
+          // from a chat post; pull the brand out so the badge shows the
+          // actual model rather than the generic "claude" role.
+          const speakerMatch =
+            n.by === "claude" ? /^([^:]+?) said: /.exec(n.text) : null;
+          const speaker = speakerMatch?.[1]?.trim();
+          const badge = speaker || (n.by === "claude" ? "agent" : n.by);
+          const accent =
+            n.by === "user"
+              ? "bg-blue-500"
+              : n.by === "system"
+              ? "bg-neutral-400"
+              : speaker
+              ? agentIdentity(speaker).avatarClass
+              : "bg-purple-500";
+          return (
+            <div key={i} className="text-[12px] flex gap-2">
+              <span
+                className={cn(
+                  "shrink-0 px-1.5 rounded text-[10px] font-mono uppercase tracking-wide text-white leading-relaxed h-fit mt-0.5",
+                  accent
+                )}
+              >
+                {badge}
+              </span>
+              <span className="text-neutral-700 leading-relaxed">{n.text}</span>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
