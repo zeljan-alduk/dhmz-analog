@@ -19,7 +19,7 @@ export function SessionBanner({
 }) {
   const [copied, setCopied] = useState<"url" | "prompt" | null>(null);
 
-  const [mode, setMode] = useState<"cli" | "desktop">("cli");
+  const [mode, setMode] = useState<"cli" | "desktop" | "codex">("cli");
 
   const isLoading = info === null;
   // Stable strings so we can compute the prompt text without a guard; while
@@ -180,7 +180,78 @@ fetchJson), \`host.state\` (read-only snapshot), \`host.React\` za
 useState/useEffect. Persistira sa sesijom. "Spremi trajno" →
 \`save_customization_as_version(name)\` → daj mi \`?cv=<id>\` link.`;
 
-  const claudePrompt = mode === "cli" ? cliPrompt : desktopPrompt;
+  const codexPrompt = `Digitaliziraj session ${sessionId} (URL: ${sessionUrl}).
+Koristi \`dhmz\` MCP server (instaliran preko \`pipx install
+git+https://github.com/zeljan-alduk/dhmz-analog.git#subdirectory=mcp\`,
+registriran u \`~/.codex/config.toml\` kao
+\`[mcp_servers.dhmz] command = "/Users/aldo/.local/bin/dhmz-session-mcp"\`).
+Toolove imaš kao \`mcp__dhmz__*\`. Ne curl — sve preko MCP-a.
+
+KORAK 1 — BRZI HANDSHAKE (bez "smijem li" pitanja, paste URL-a je
+autorizacija za read i chat):
+1) \`post_chat("spojen, gledam sken")\` — odmah, da vidim da si tu.
+2) Paralelno: \`get_briefing()\`, \`get_state()\`, \`get_image(max_edge=1200)\`.
+3) U \`post_chat\` 1-2 rečenice: chart-type, dimenzije, prva opažanja.
+
+KORAK 2 — KAD KORISNIK NEŠTO TRAŽI ili PRISTUPA SAM, OVAKO REAGIRAJ:
+- IMMEDIATE ACK (\`post_chat(kind="reply")\`): jedna kratka rečenica koja
+  pokazuje da si razumio: "Razumio — krećem na X" ili "Pogledat ću Y,
+  vraćam se za par sec". To je *prije* nego što i počneš pripremu.
+- Status koraka usput (kind="reply"): "X → done, n=Y".
+- Rezultat / pitanje korisniku: kind="reply".
+
+EXTERNALIZIRAJ SVO RAZMIŠLJANJE — HARD RULE, ne savjet:
+Codexov internal reasoning NIJE vidljiv u web chatu. Korisnik želi
+near-stream-of-consciousness view. Mehanički pravilo:
+  (a) PRIJE svakog netrivijalnog tool call-a:
+      \`post_chat(kind="thinking", text="💭 ...")\` što kaniš i zašto.
+      Npr: "💭 Krećem extract_trace s traceInk=auto; trag slabo plav."
+  (b) NAKON svakog rezultata koji ti je promijenio razumijevanje:
+      \`post_chat(kind="thinking", text="💭 ...")\` što si naučio + dalje.
+      Npr: "💭 Kalibracija prazna, dataPoints 0 → idem od kutova."
+  (c) Trivijalnosti (back-to-back \`get_state\`, \`poll_chat\` pollovi)
+      preskoči — ne narate svaki čitalac call.
+Ne misli pa djeluj — misli, **\`post_chat(kind="thinking")\`**, pa djeluj.
+
+NEMOJ NAMETATI:
+- Ne pokreći \`set_calibration\`, \`extract_trace\`, \`swap_image\` ni druge
+  state-mutating toolove dok ne dobiješ jasan signal što korisnik želi.
+- Predloži opcije kao pitanje: "Mogu (a) auto-cal → extract → CSV,
+  (b) ručna kalibracija prvo, (c) samo pregled. Što voliš?"
+- \`poll_chat(since=N, wait=30)\` dok čekaš jasan odgovor.
+
+JEDNOM KAD DOBIJEM ODABIR:
+- Izvrši cijeli put autonomno, bez međupotvrda. Status-postovi (kratki
+  kind="reply" + kind="thinking" za rationale).
+- Pitaj ponovo SAMO prije nepovratnih (\`swap_image\`,
+  \`clear_annotations\`, \`clear_data_points\`) ili stvarne dvojbe.
+- Dugi pozivi (\`extract_trace\` ~30-60s): najavi "⏳ Vrtim: X (~Ys)"
+  (kind="reply"), izvrši, objavi rezultate (+ overlay slika kao
+  \`images\` attachment).
+- Između koraka \`poll_chat(wait=2)\`; "stop" → prekini.
+
+CHAT JE GLAVNI PROZOR: sve ide u \`post_chat\`. Codex terminal drži se
+na kratki status po koraku.
+
+DRŽI SESIJU UVIJEK OTVORENU:
+- \`poll_chat\` timeout / 5xx / network drop → ponovi odmah, pa backoff
+  2s → 5s → 15s (cap 30s). Nikad ne odustaješ.
+- Druga MCP tool 5xx → kratki \`post_chat(kind="thinking")\` ("backend
+  hipnpalo, ponavljam"), pa retry za 2-5s. Dvije za redom →
+  \`post_chat(kind="reply")\` obavijest korisniku + zadrži poll loop.
+- 404 znači da je sesija stvarno nestala (TTL); tek tada stani.
+- Idle? Drži beskonačni \`poll_chat(wait=30)\` kao heartbeat.
+
+UI PROMJENE (kad korisnik traži "dodaj gumb / sakri X / novi pregled"):
+Koristi customization toolove, NE diraj repo:
+\`apply_css\`, \`mount_slot\`, \`unmount_slot\`, \`clear_customization\`,
+\`save_customization_as_version\`, \`apply_customization_from_id\`,
+\`get_customization\`. Slotovi: \`toolbar-extra\` | \`sidebar-extra\` |
+\`overlay\` | \`route\`. JSX: \`function Component({host}){...}\` → JSX.
+"Spremi trajno" → \`save_customization_as_version(name)\` → \`?cv=<id>\` link.`;
+
+  const claudePrompt =
+    mode === "cli" ? cliPrompt : mode === "desktop" ? desktopPrompt : codexPrompt;
 
   const copy = async (text: string, kind: "url" | "prompt") => {
     try {
@@ -247,9 +318,10 @@ useState/useEffect. Persistira sa sesijom. "Spremi trajno" →
 
         <div className="p-5 space-y-5 overflow-y-auto flex-1 min-h-0">
           <p className="text-sm text-neutral-700 leading-relaxed">
-            Sken je pripremljen kao session koju može voditi Claude. Možeš
-            mu prosliještiti URL u <strong>terminalu</strong> (Claude Code)
-            ili u <strong>Claude Desktopu</strong> preko našeg{" "}
+            Sken je pripremljen kao session koju može voditi agent. Možeš
+            mu prosliještiti URL u <strong>terminalu</strong> (Claude Code),
+            u <strong>Claude Desktopu</strong> ili u{" "}
+            <strong>Codex CLI</strong> preko našeg{" "}
             <code className="font-mono text-[12px] bg-neutral-100 px-1 rounded">
               dhmz
             </code>{" "}
@@ -287,12 +359,13 @@ useState/useEffect. Persistira sa sesijom. "Spremi trajno" →
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-[11px] uppercase tracking-wide text-neutral-500 font-semibold">
-                    Prompt za Claude
+                    Prompt za agent
                   </span>
-                  <div className="flex gap-1" role="tablist" aria-label="Claude engine">
+                  <div className="flex gap-1" role="tablist" aria-label="Engine">
                     {([
                       { id: "cli", label: "Terminal" },
                       { id: "desktop", label: "Desktop" },
+                      { id: "codex", label: "Codex" },
                     ] as const).map((t) => (
                       <button
                         key={t.id}
