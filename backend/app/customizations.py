@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path as _FsPath
 from typing import Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("dhmz.customizations")
@@ -164,14 +164,15 @@ def get_customization(cid: str) -> dict:
     }
 
 
-@router.delete("/customizations/{cid}", status_code=204)
-def delete_customization(cid: str) -> None:
+@router.delete("/customizations/{cid}")
+def delete_customization(cid: str) -> Response:
     p = _path(cid)
     if p.exists():
         try:
             p.unlink()
         except Exception as e:
             log.warning("customizations: rm %s failed: %s", cid, e)
+    return Response(status_code=204)
 
 
 # ─── Cleanup loop ───────────────────────────────────────────────────────
